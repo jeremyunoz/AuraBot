@@ -39,7 +39,7 @@ class tts:
         # For system say, rate is set per call
 
     def speak(self, message):
-        print(f"AuraPet: {message}")
+        print(f"AuraBot: {message}")
         
         # On macOS, use system say command if pyttsx3 isn't working reliably
         if self._use_system_say:
