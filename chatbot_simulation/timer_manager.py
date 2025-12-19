@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Dict, List, Optional
 from uuid import uuid4
+from session_timer import SessionTimer
 
 
 class TimerManager:
@@ -22,7 +23,7 @@ class TimerManager:
     DEFAULT_TIMER_NAME = "Timer"
     DEFAULT_NOTIFICATION_MESSAGE = "Your timer is up!"
     
-    def __init__(self, tts_engine, logger, max_timers: int = None):
+    def __init__(self, tts_engine, logger, max_timers: int = None, session_data_file: Optional[str] = None):
         """
         Initialize the TimerManager.
         
@@ -30,6 +31,7 @@ class TimerManager:
             tts_engine: TTS engine instance for timer notifications
             logger: ConversationLogger instance for logging timer events
             max_timers: Maximum concurrent timers (default: MAX_CONCURRENT_TIMERS)
+            session_data_file: Optional path for session timer data file
         """
         self.tts_engine = tts_engine
         self.logger = logger
@@ -38,6 +40,9 @@ class TimerManager:
         # Thread-safe timer storage
         self._timers: Dict[str, Dict] = {}
         self._timers_lock = threading.Lock()
+        
+        # Initialize session timer for tracking sitting time
+        self.session_timer = SessionTimer(session_data_file)
     
     def set_timer(self, duration_seconds: int, name: Optional[str] = None) -> str:
         """

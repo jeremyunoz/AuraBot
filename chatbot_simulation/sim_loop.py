@@ -8,11 +8,10 @@ from tts import tts
 from logger import ConversationLogger
 from response_handler import ResponseHandler
 from timer_manager import TimerManager
-from time import sleep, time
+from time import sleep
 import os
 import traceback
-import threading
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 
 # Configuration
@@ -50,17 +49,10 @@ class AuraBot:
         self.timer_manager = TimerManager(self.tts_engine, self.logger)
         
         self._is_running = False
-        
-        # Inactivity timer tracking
-        self._last_activity_time = time()
-        self._inactivity_timer_thread = None
-        self._timer_lock = threading.Lock()
     
     def start(self):
         """Start the chatbot conversation."""
         self._is_running = True
-        self._last_activity_time = time()
-        self._start_inactivity_timer()
         self._speak_safely(self.greeting)
         self._run_conversation_loop()
     
@@ -73,9 +65,6 @@ class AuraBot:
             # Skip empty inputs
             if not user_text:
                 continue
-            
-            # Update activity time
-            self._update_activity_time()
             
             # Get bot response
             bot_text, should_exit = self.response_handler.get_response(user_text)
@@ -106,39 +95,10 @@ class AuraBot:
             print(f"Error speaking: {e}")
             traceback.print_exc()
     
-    def _start_inactivity_timer(self):
-        """Start the background inactivity timer thread."""
-        def timer_loop():
-            """Background thread that continuously tracks inactivity time."""
-            while self._is_running:
-                sleep(1)  # Check every second
-                with self._timer_lock:
-                    elapsed_time = time() - self._last_activity_time
-                    # For now, just track the time (reminders will be added in next step)
-                    # This timer runs continuously in the background
-        
-        self._inactivity_timer_thread = threading.Thread(target=timer_loop, daemon=True)
-        self._inactivity_timer_thread.start()
-    
-    def _update_activity_time(self):
-        """Update the last activity time to current time."""
-        with self._timer_lock:
-            self._last_activity_time = time()
-    
-    def get_inactivity_duration(self) -> float:
-        """
-        Get the duration of inactivity in seconds.
-        
-        Returns:
-            float: Seconds since last activity
-        """
-        with self._timer_lock:
-            return time() - self._last_activity_time
-    
     # Timer convenience methods
     def set_timer(self, duration_seconds: int, name: Optional[str] = None) -> str:
         """
-        Set a timer (convenience method that also updates activity time).
+        Set a timer (convenience method).
         
         Args:
             duration_seconds: Duration in seconds
@@ -147,12 +107,7 @@ class AuraBot:
         Returns:
             str: Timer ID
         """
-        self._update_activity_time()
         return self.timer_manager.set_timer(duration_seconds, name)
-    
-    def get_active_timers(self):
-        """Get list of active timers."""
-        return self.timer_manager.get_active_timers()
     
     def get_timer_status_message(self) -> str:
         """
@@ -178,9 +133,86 @@ class AuraBot:
             
             return f"You have {len(active_timers)} active timers: {', '.join(parts)}."
     
+    # Session Timer convenience methods (for object detection integration)
+    def start_sitting_timer(self) -> bool:
+        """
+        Start tracking sitting time (user detected in area).
+        To be called by object detection when user is detected.
+        
+        Returns:
+            bool: True if started, False if already active
+        """
+        return self.timer_manager.session_timer.start()
+    
+    def pause_sitting_timer(self) -> bool:
+        """
+        Pause sitting time tracking (user left area).
+        To be called by object detection when user leaves.
+        
+        Returns:
+            bool: True if paused, False if not active
+        """
+        return self.timer_manager.session_timer.pause()
+    
+    def stop_sitting_timer(self) -> Optional[Dict]:
+        """
+        Stop current sitting session and save it.
+        
+        Returns:
+            Optional[Dict]: Session data if session existed, None otherwise
+        """
+        return self.timer_manager.session_timer.stop()
+    
+    def get_current_sitting_time(self) -> float:
+        """
+        Get accumulated sitting time for current session.
+        
+        Returns:
+            float: Total seconds in current session
+        """
+        return self.timer_manager.session_timer.get_current_session_time()
+    
+    def get_sitting_timer_state(self) -> str:
+        """
+        Get current state of sitting timer.
+        
+        Returns:
+            str: "idle", "active", or "paused"
+        """
+        return self.timer_manager.session_timer.get_state()
+    
+    def get_sitting_session_history(self, limit: Optional[int] = None) -> List[Dict]:
+        """
+        Get saved sitting session history.
+        
+        Args:
+            limit: Optional limit on number of sessions to return
+        
+        Returns:
+            List[Dict]: List of session records
+        """
+        return self.timer_manager.session_timer.get_session_history(limit)
+    
+    def get_total_sitting_time(self) -> float:
+        """
+        Get total sitting time across all saved sessions.
+        
+        Returns:
+            float: Total seconds across all sessions
+        """
+        return self.timer_manager.session_timer.get_total_sitting_time()
+    
     def _shutdown(self):
         """Clean up resources and shutdown the chatbot."""
         self._is_running = False
+        
+        # Stop and save current sitting session if active
+        try:
+            session_data = self.timer_manager.session_timer.stop()
+            if session_data:
+                print(f"Saved sitting session: {session_data.get('formatted_duration', 'N/A')}")
+        except Exception as e:
+            print(f"Error stopping sitting timer: {e}")
         
         # Cancel all active timers
         try:
@@ -201,7 +233,6 @@ def main():
     """Main entry point for the chatbot."""
     chatbot = AuraBot()
     chatbot.start()
-    print("Sitting time: ", chatbot.get_inactivity_duration())
 
 
 if __name__ == "__main__":
