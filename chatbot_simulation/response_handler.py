@@ -4,7 +4,10 @@ Handles bot response generation based on user input.
 """
 
 from typing import Optional, Dict, Tuple
-from timer_parser import TimerParser
+try:
+    from .timer_parser import TimerParser
+except ImportError:
+    from timer_parser import TimerParser
 
 
 class ResponseHandler:
@@ -176,9 +179,12 @@ class ResponseHandler:
                     return f"You have {len(active_timers)} timers running: {', '.join(parts)}."
         
         except ValueError as e:
+            # Handle maximum timer limit error
+            if "maximum" in str(e).lower() or "max" in str(e).lower():
+                return "You have too many active timers. Please cancel one first, then try again."
             return str(e)
         except Exception as e:
-            return f"Sorry, I encountered an error: {str(e)}"
+            return f"Sorry, something went wrong. Please try again."
         
         return None
     

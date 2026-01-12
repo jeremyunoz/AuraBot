@@ -7,7 +7,10 @@ import threading
 import time
 from typing import Dict, List, Optional
 from uuid import uuid4
-from session_timer import SessionTimer
+try:
+    from .session_timer import SessionTimer
+except ImportError:
+    from session_timer import SessionTimer
 
 
 class TimerManager:

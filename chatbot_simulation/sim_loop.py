@@ -38,7 +38,6 @@ class AuraBot:
         """
         self.greeting = greeting
         self.logger = ConversationLogger(log_file or LOG_FILE)
-        self.response_handler = ResponseHandler(custom_responses)
         
         # Initialize STT and TTS
         self.stt = STT()    
@@ -47,6 +46,9 @@ class AuraBot:
         
         # Initialize TimerManager
         self.timer_manager = TimerManager(self.tts_engine, self.logger)
+        
+        # Initialize ResponseHandler with TimerManager for timer command integration
+        self.response_handler = ResponseHandler(custom_responses, self.timer_manager)
         
         self._is_running = False
     
