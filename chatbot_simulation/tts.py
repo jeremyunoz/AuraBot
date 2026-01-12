@@ -2,6 +2,7 @@ import pyttsx3
 from time import sleep
 import platform
 import subprocess
+import threading
 
 """
     Simulate Text-to-Speech feature
@@ -11,6 +12,8 @@ class TTS:
     def __init__(self):
         self._use_system_say = False
         self._is_macos = platform.system() == "Darwin"
+        # Lock to prevent concurrent speech from multiple threads
+        self._speak_lock = threading.Lock()
         
         # On macOS, pyttsx3 often has issues after microphone use (completes but no audio)
         # Use native 'say' command which is more reliable on macOS
@@ -41,6 +44,12 @@ class TTS:
     def speak(self, message):
         print(f"AuraBot: {message}")
         
+        # Use lock to prevent concurrent speech from multiple threads
+        with self._speak_lock:
+            self._speak_impl(message)
+    
+    def _speak_impl(self, message):
+        """Internal speak implementation (called with lock held)."""
         # On macOS, use system say command if pyttsx3 isn't working reliably
         if self._use_system_say:
             try:
@@ -111,7 +120,7 @@ class TTS:
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception as e2:
                     print(f"Error using system say: {e2}")
-        
+    
     def shutdown_tts(self):
         if not self._use_system_say and self._engine:
             try:
