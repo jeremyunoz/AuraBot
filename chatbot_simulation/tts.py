@@ -7,7 +7,7 @@ import subprocess
     Simulate Text-to-Speech feature
 """
 
-class tts:
+class TTS:
     def __init__(self):
         self._use_system_say = False
         self._is_macos = platform.system() == "Darwin"

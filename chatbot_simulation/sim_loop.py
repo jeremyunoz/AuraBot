@@ -4,7 +4,7 @@ Handles conversation flow, speech recognition, and text-to-speech interactions.
 """
 
 from stt import STT
-from tts import tts
+from tts import TTS
 from logger import ConversationLogger
 from response_handler import ResponseHandler
 from timer_manager import TimerManager
@@ -41,8 +41,8 @@ class AuraBot:
         self.response_handler = ResponseHandler(custom_responses)
         
         # Initialize STT and TTS
-        self.stt = STT()
-        self.tts_engine = tts()
+        self.stt = STT()    
+        self.tts_engine = TTS()
         self.tts_engine.style()
         
         # Initialize TimerManager
