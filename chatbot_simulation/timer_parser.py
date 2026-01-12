@@ -110,8 +110,7 @@ class TimerParser:
         
         Looks for patterns like:
         - "called X" / "named X"
-        - "X timer" (where X is the name)
-        - "timer for X" / "timer X"
+        - "X timer" (where X is a short, meaningful name like "coffee", "break")
         
         Args:
             text: Input text containing potential timer name
@@ -121,40 +120,68 @@ class TimerParser:
         """
         text_lower = text.lower().strip()
         
-        # Pattern: "called <name>" or "named <name>"
-        # Capture everything after "called" or "named" up to end or before another command word
+        # Common conversational words to filter out (based on actual user patterns from logs)
+        conversational_words = {
+            'can', 'you', 'send', 'me', 'the', 'set', 'a', 'an', 'my', 'please',
+            'could', 'would', 'will', 'help', 'create', 'make', 'give', 'cancel',
+            'stop', 'delete', 'remove', 'that', 'this', 'another', 'let', 'lets',
+            'best', 'way', 'for', 'to', 'do', 'want', 'need', 'get'
+        }
+        
+        # Pattern: "called <name>" or "named <name>" - most reliable
         called_pattern = r'(?:called|named)\s+([a-zA-Z0-9\s]+?)(?:\s+for\s+\d|$)'
         match = re.search(called_pattern, text_lower)
         if match:
             name = match.group(1).strip()
-            # Remove trailing "timer" if the name ends with it (e.g., "break timer" becomes "break timer", not "break")
-            # But keep it if it's part of the name
-            # Actually, if user says "named break timer", we want "Break Timer"
+            # Remove trailing "timer" if present
+            name = re.sub(r'\s+timer\s*$', '', name)
             if name and len(name) > 0:
-                return name.title()
+                # Limit to reasonable length (1-3 words typically)
+                words = name.split()
+                if len(words) <= 3:
+                    return name.title()
         
-        # Pattern: "<name> timer" (name before "timer") - but not command words
-        # Only match if there's a meaningful name before "timer"
-        name_timer_pattern = r'((?:^|\s)(?!set|a|an|the|my|timer|cancel|stop|delete|remove)[a-zA-Z0-9]+(?:\s+[a-zA-Z0-9]+)*?)\s+timer'
-        match = re.search(name_timer_pattern, text_lower)
-        if match:
+        # Pattern: "<name> timer" - but be very conservative
+        # Only match short, meaningful names (1-2 words) that aren't conversational phrases
+        # Look for patterns like "coffee timer", "break timer", "work timer" etc.
+        # Try to match word(s) immediately before "timer"
+        name_timer_pattern = r'(?:^|\s)([a-zA-Z]+(?:\s+[a-zA-Z]+)?)\s+timer\b'
+        matches = re.finditer(name_timer_pattern, text_lower)
+        for match in matches:
             name = match.group(1).strip()
-            # Remove common prefixes
-            name = re.sub(r'^(set|a|an|the|my|cancel|stop|delete|remove)\s+', '', name, flags=re.IGNORECASE)
-            if name and len(name) > 0 and not re.match(r'^\d', name):
-                # Make sure we didn't just get a command word
-                if name.lower() not in ['set', 'a', 'an', 'the', 'my', 'timer', 'cancel', 'stop']:
-                    return name.title()
-        
-        # Pattern: "timer for <name>" - only if name is not a number/duration and not in cancel context
-        if 'cancel' not in text_lower and 'stop' not in text_lower:
-            timer_for_pattern = r'timer\s+for\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)*?)(?:\s+for\s+\d|\s*$)'
-            match = re.search(timer_for_pattern, text_lower)
-            if match:
-                name = match.group(1).strip()
-                # Don't extract if it looks like a duration or command word
-                if name and len(name) > 0 and not re.match(r'^\d', name) and name not in ['set', 'a', 'an', 'the']:
-                    return name.title()
+            
+            # Remove leading articles (a, an, the)
+            name = re.sub(r'^(a|an|the)\s+', '', name, flags=re.IGNORECASE)
+            name = name.strip()
+            
+            if not name:
+                continue
+                
+            words = name.split()
+            
+            # Only accept 1-2 word names (after removing articles)
+            if len(words) > 2:
+                continue
+            
+            # Filter out conversational phrases - check if ALL words are conversational
+            if all(word in conversational_words for word in words):
+                continue
+            
+            # Filter out single-word conversational phrases
+            if len(words) == 1 and name.lower() in conversational_words:
+                continue
+            
+            # Filter out common command words
+            if name.lower() in ['set', 'a', 'an', 'the', 'my', 'timer', 'cancel', 'stop']:
+                continue
+            
+            # Don't extract if it starts with a number
+            if re.match(r'^\d', name):
+                continue
+            
+            # Only extract if it's a meaningful name (not too long, not conversational)
+            if name and 1 <= len(words) <= 2:
+                return name.title()
         
         return None
     
@@ -203,16 +230,47 @@ class TimerParser:
             result["action"] = "cancel"
             result["success"] = True
             
-            # Try to extract timer name for cancellation
-            name = self.extract_timer_name(text_lower)
-            if name:
-                result["name"] = name
+            # Only try to extract timer name if there's a clear name pattern
+            # Don't extract names from "cancel the timer" or "cancel timer" (generic cancel)
+            # Only extract from patterns like "cancel the coffee timer" or "cancel coffee timer"
+            # Pattern: "cancel (the) <name> timer" - only extract if name exists before "timer"
+            cancel_name_pattern = r'(?:cancel|stop|delete|remove)\s+(?:the\s+)?([a-zA-Z]+(?:\s+[a-zA-Z]+)?)\s+timer\b'
+            match = re.search(cancel_name_pattern, text_lower)
+            if match:
+                name = match.group(1).strip()
+                # Filter out conversational words and command words
+                conversational_words = {'can', 'you', 'send', 'me', 'the', 'set', 'a', 'an', 'my', 'please',
+                                      'could', 'would', 'will', 'help', 'create', 'make', 'give', 'cancel',
+                                      'stop', 'delete', 'remove', 'that', 'this', 'another', 'let', 'lets',
+                                      'best', 'way', 'for', 'to', 'do', 'want', 'need', 'get'}
+                words = name.split()
+                # Only extract if it's a meaningful name (1-2 words, not all conversational)
+                if name and 1 <= len(words) <= 2 and not all(word in conversational_words for word in words):
+                    result["name"] = name.title()
         
-        elif any(keyword in text_lower for keyword in ["time left", "how much time", "timer status", "timer remaining"]):
+        # Query patterns - more flexible matching
+        query_patterns = [
+            r'\b(?:how\s+much\s+time|time\s+left|timer\s+status|timer\s+remaining)',
+            r'\bwhat\s+is\s+(?:the\s+)?(?:current\s+)?timer',
+            r'\b(?:what\'?s?\s+)(?:the\s+)?(?:current\s+)?timer\s+(?:status|remaining|left)?',
+            r'\bhow\s+long\s+(?:is\s+)?(?:my\s+)?(?:the\s+)?timer',
+            r'\b(?:what\'?s?\s+|what\s+is\s+)(?:the\s+)?timer\s+(?:status|remaining|left)'
+        ]
+        # Make sure "what time is it" doesn't match (time query, not timer query)
+        if any(re.search(pattern, text_lower) for pattern in query_patterns) and 'what time is it' not in text_lower:
             result["action"] = "query"
             result["success"] = True
         
-        elif any(keyword in text_lower for keyword in ["what timers", "list timers", "show timers", "active timers"]):
+        # List patterns - matches "list timer", "list the timer", "list my timer", etc.
+        list_patterns = [
+            r'\blist\s+(?:the\s+)?(?:my\s+)?(?:active\s+)?timer(?:s)?\b',  # list timer, list the timer, list my timer, list active timer, list the active timer
+            r'\b(?:what|show)\s+timers?\s+(?:are\s+)?(?:running|active)?',
+            r'\b(?:active\s+)?timers?\s+(?:are\s+)?(?:running|active)',
+            r'\bshow\s+(?:me\s+)?(?:the\s+)?(?:active\s+)?timers?',
+            r'\bwhat\s+timers?\b(?!\s+is\s+it)',  # "what timers" but not "what time is it"
+            r'\bactive\s+timers?\b'  # standalone "active timers"
+        ]
+        if any(re.search(pattern, text_lower) for pattern in list_patterns):
             result["action"] = "list"
             result["success"] = True
         
