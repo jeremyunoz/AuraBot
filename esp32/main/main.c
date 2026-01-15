@@ -8,8 +8,38 @@
 #include "freertos/event_groups.h"
 
 #include "wifi_connect.h"
+#include "mqtt.h"
+#include "esp_timer.h"
 
 static const char *TAG = "main";
+
+static void publisher_task(void *arg)
+{
+    (void)arg;
+
+    char payload[160];
+    int counter = 0;
+
+    while (1) {
+        // Replace these placeholder values with real sensor reads.
+        int motion = 1.5;
+        float distance_cm = 42.5f;
+
+        long long ts_us = (long long)esp_timer_get_time();
+
+        // JSON payload that your Python subscriber can decode.
+        snprintf(payload, sizeof(payload),
+                 "{\"motion\":%d,\"distance_cm\":%.2f,\"count\":%d,\"ts_us\":%lld}",
+                 motion, distance_cm, counter++, ts_us);
+
+        esp_err_t err = mqtt_publish("aurabot/sensors", payload, 1, 0);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "mqtt_publish failed: %s", esp_err_to_name(err));
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
 
 void app_main(void)
 {
@@ -31,10 +61,13 @@ void app_main(void)
 
     ESP_ERROR_CHECK(wifi_connect_sta(&cfg));
 
+    // Start periodic publishing of sensor data.
+    xTaskCreate(publisher_task, "publisher_task", 4096, NULL, 5, NULL);
+
     ESP_LOGI(TAG, "WiFi connected, main loop running");
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI(TAG, "Alive");
+        ESP_LOGI(TAG, "Main loop alive");
     }
 }

@@ -24,7 +24,7 @@ static void mqtt_event_handler(void *arg,
 
         // Subscribe to your control topic here
         esp_mqtt_client_subscribe(client, "aurabot/control", 1);
-        esp_mqtt_client_publish(client, "aurabot/status", "ESP32 online", 0, 1, 1);
+        mqtt_publish("aurabot/status", "{\"device\":\"esp32\",\"status\":\"online\"}", 1, 1);
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -111,16 +111,23 @@ esp_err_t mqtt_publish(const char *topic,
     if (!client || !connected) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (!topic || topic[0] == '\0' || !payload) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (qos < 0 || qos > 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (retain != 0 && retain != 1) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
-    esp_mqtt_client_publish(
-        client,
-        topic,
-        payload,
-        0,
-        qos,
-        retain
-    );
+    int msg_id = esp_mqtt_client_publish(client, topic, payload, 0, qos, retain);
+    if (msg_id < 0) {
+        ESP_LOGE(TAG, "Publish failed topic=%s", topic);
+        return ESP_FAIL;
+    }
 
+    ESP_LOGI(TAG, "Published msg_id=%d topic=%s payload=%s", msg_id, topic, payload);
     return ESP_OK;
 }
 
