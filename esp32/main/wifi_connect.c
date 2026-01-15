@@ -8,8 +8,10 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
+#include "esp_err.h"
 
 #include "wifi_connect.h"
+#include "mqtt.h"
 
 static const char *TAG = "wifi_connect";
 
@@ -19,6 +21,7 @@ static const char *TAG = "wifi_connect";
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num;
 static int s_max_retry;
+static bool mqtt_started = false;
 
 static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
@@ -28,6 +31,12 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
     }
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        // If WiFi drops, stop MQTT so it can cleanly reconnect after IP is back.
+        if (mqtt_started) {
+            mqtt_stop();
+            mqtt_started = false;
+        }
+
         if (s_retry_num < s_max_retry) {
             s_retry_num++;
             ESP_LOGI(TAG, "retry to connect to the AP, %d/%d", s_retry_num, s_max_retry);
@@ -42,6 +51,18 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "got ip: " IPSTR, IP2STR(&event->ip_info.ip));
+
+        // Start MQTT only after we have an IP address.
+        if (!mqtt_started) {
+            esp_err_t err = mqtt_start();
+            if (err == ESP_OK) {
+                mqtt_started = true;
+                ESP_LOGI(TAG, "MQTT started");
+            } else {
+                ESP_LOGE(TAG, "MQTT start failed: %s", esp_err_to_name(err));
+            }
+        }
+
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         return;
