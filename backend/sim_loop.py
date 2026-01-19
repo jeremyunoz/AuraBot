@@ -8,10 +8,13 @@ from tts import TTS
 from logger import ConversationLogger
 from response_handler import ResponseHandler
 from timer_manager import TimerManager
+from wellness_timer_trigger import WellnessTimerTrigger
 from time import sleep
+from typing import Optional, Dict, List
+from mqtt_api import MQTTAPI
+from mqtt_integration import MQTTIntegration
 import os
 import traceback
-from typing import Optional, Dict, List
 
 
 # Configuration
@@ -21,13 +24,17 @@ AUDIO_HANDOFF_DELAY = 0.1  # Delay for audio device handoff
 SHUTDOWN_DELAY = 0.5  # Delay before shutdown
 
 
+
 class AuraBot:
     """Main chatbot class that orchestrates STT, TTS, and conversation logic."""
     
     def __init__(self, 
                  greeting: str = "Hello! I am AuraBot. Let's talk.",
                  log_file: Optional[str] = None,
-                 custom_responses: Optional[Dict[str, str]] = None):
+                 custom_responses: Optional[Dict[str, str]] = None,
+                 enable_mqtt: bool = True,
+                 wellness_threshold_seconds: Optional[int] = None,
+                 wellness_break_duration_seconds: Optional[int] = None):
         """
         Initialize the AuraBot chatbot.
         
@@ -35,6 +42,11 @@ class AuraBot:
             greeting: Initial greeting message
             log_file: Optional custom log file path
             custom_responses: Optional custom response dictionary
+            enable_mqtt: Whether to enable MQTT integration for sensor data
+            wellness_threshold_seconds: Seconds of sitting before triggering wellness timer
+                                      (None uses default from WellnessTimerTrigger)
+            wellness_break_duration_seconds: Duration of wellness break timer in seconds
+                                           (None uses default from WellnessTimerTrigger)
         """
         self.greeting = greeting
         self.logger = ConversationLogger(log_file or LOG_FILE)
@@ -50,11 +62,36 @@ class AuraBot:
         # Initialize ResponseHandler with TimerManager for timer command integration
         self.response_handler = ResponseHandler(custom_responses, self.timer_manager)
         
+        # Initialize MQTT integration (optional)
+        self.mqtt_api: Optional[MQTTAPI] = None
+        self.mqtt_integration: Optional[MQTTIntegration] = None
+        
+        if enable_mqtt:
+            try:
+                self.mqtt_api = MQTTAPI(
+                    self,
+                    wellness_threshold_seconds=wellness_threshold_seconds,
+                    wellness_break_duration_seconds=wellness_break_duration_seconds
+                )
+                self.mqtt_integration = MQTTIntegration(self.mqtt_api)
+            except Exception as e:
+                print(f"Warning: Could not initialize MQTT integration: {e}")
+                print("Continuing without MQTT support...")
+        
         self._is_running = False
     
     def start(self):
         """Start the chatbot conversation."""
         self._is_running = True
+        
+        # Start MQTT integration if enabled
+        if self.mqtt_integration:
+            try:
+                self.mqtt_integration.start()
+                print("MQTT integration enabled - sensor data will trigger wellness timers")
+            except Exception as e:
+                print(f"Warning: MQTT integration failed to start: {e}")
+        
         self._speak_safely(self.greeting)
         self._run_conversation_loop()
     
@@ -208,6 +245,20 @@ class AuraBot:
         """Clean up resources and shutdown the chatbot."""
         self._is_running = False
         
+        # Stop wellness timer monitoring
+        if self.mqtt_api and self.mqtt_api.wellness_trigger:
+            try:
+                self.mqtt_api.wellness_trigger.stop_monitoring()
+            except Exception as e:
+                print(f"Error stopping wellness timer monitoring: {e}")
+        
+        # Stop MQTT integration
+        if self.mqtt_integration:
+            try:
+                self.mqtt_integration.stop()
+            except Exception as e:
+                print(f"Error stopping MQTT integration: {e}")
+        
         # Stop and save current sitting session if active
         try:
             session_data = self.timer_manager.session_timer.stop()
@@ -232,9 +283,44 @@ class AuraBot:
 
 
 def main():
-    """Main entry point for the chatbot."""
-    chatbot = AuraBot()
-    chatbot.start()
+    """
+    Main entry point for the chatbot.
+    
+    Configuration via environment variables:
+    - ENABLE_MQTT: Set to "false" to disable MQTT (default: enabled)
+    - WELLNESS_THRESHOLD_SECONDS: Sitting time threshold before wellness timer triggers
+    - WELLNESS_BREAK_DURATION_SECONDS: Duration of wellness break timer
+    """
+    from dotenv import load_dotenv
+    
+    load_dotenv()
+    
+    # Check MQTT enable/disable
+    enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
+    
+    # Get wellness configuration from environment variables
+    env_threshold = os.getenv("WELLNESS_THRESHOLD_SECONDS")
+    wellness_threshold = int(env_threshold) if env_threshold else None
+    
+    env_duration = os.getenv("WELLNESS_BREAK_DURATION_SECONDS")
+    break_duration = int(env_duration) if env_duration else None
+    
+    # Print configuration if set
+    if enable_mqtt and (wellness_threshold is not None or break_duration is not None):
+        print("Wellness timer configuration:")
+        if wellness_threshold is not None:
+            hours = wellness_threshold // 3600
+            minutes = (wellness_threshold % 3600) // 60
+            print(f"  Threshold: {wellness_threshold}s ({hours}h {minutes}m)")
+        if break_duration is not None:
+            minutes = break_duration // 60
+            print(f"  Break duration: {break_duration}s ({minutes}m)")
+    
+    AuraBot(
+        enable_mqtt=enable_mqtt,
+        wellness_threshold_seconds=wellness_threshold,
+        wellness_break_duration_seconds=break_duration
+    ).start()
 
 
 if __name__ == "__main__":
