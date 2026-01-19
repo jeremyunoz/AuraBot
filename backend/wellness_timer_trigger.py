@@ -59,12 +59,22 @@ class WellnessTimerTrigger:
         self._monitoring_thread: Optional[threading.Thread] = None
         self._stop_monitoring = threading.Event()
         self._session_time_getter: Optional[Callable[[], float]] = None
+        
+        # Track last wellness timer trigger to prevent continuous creation
+        # This tracks the session time at which we last triggered a wellness timer
+        self._last_trigger_session_time: Optional[float] = None
+        self._trigger_lock = threading.Lock()
     
     def check_and_trigger_wellness_timer(self, session_time_seconds: float) -> Optional[str]:
         """
         Check if user has been sitting too long and auto-create break timer.
         
-        Prevents duplicate wellness timers by checking if one already exists.
+        Triggers wellness timer once per threshold period based on session time,
+        not just when threshold is reached. This prevents continuous timer creation.
+        
+        Logic:
+        - First trigger: When session_time >= threshold
+        - Subsequent triggers: When session_time >= last_trigger_time + threshold
         
         Args:
             session_time_seconds: Current accumulated sitting time in seconds
@@ -72,58 +82,82 @@ class WellnessTimerTrigger:
         Returns:
             Optional[str]: Timer ID if created, None otherwise
         """
-        # Only trigger if threshold is reached
-        if session_time_seconds < self.sitting_threshold_seconds:
-            # Debug: Show progress if close to threshold
-            if session_time_seconds > 0:
-                progress = (session_time_seconds / self.sitting_threshold_seconds) * 100
-                if progress > 80:  # Only log when >80% to threshold
-                    print(f"[Wellness Timer] Progress: {progress:.1f}% ({session_time_seconds:.1f}s / {self.sitting_threshold_seconds}s)")
-            return None
-        
-        # Check if wellness timer already exists (prevent duplicates)
-        active_wellness_timers = self.timer_manager.get_active_timers(
-            timer_type=TimerManager.TIMER_TYPE_WELLNESS
-        )
-        
-        if active_wellness_timers:
-            # Wellness timer already exists, don't create another
-            return None
-        
-        # Create wellness break timer
-        try:
-            timer_id = self.timer_manager.set_timer(
-                duration_seconds=self.break_duration_seconds,
-                name=self.break_timer_name,
+        with self._trigger_lock:
+            # Determine the session time threshold for next trigger
+            if self._last_trigger_session_time is None:
+                # First trigger: wait until threshold is reached
+                next_trigger_threshold = self.sitting_threshold_seconds
+            else:
+                # Subsequent triggers: wait for another full threshold period
+                next_trigger_threshold = self._last_trigger_session_time + self.sitting_threshold_seconds
+            
+            # Check if we've reached the next trigger threshold
+            if session_time_seconds < next_trigger_threshold:
+                return None
+            
+            # Check if wellness timer already exists (prevent duplicates)
+            active_wellness_timers = self.timer_manager.get_active_timers(
                 timer_type=TimerManager.TIMER_TYPE_WELLNESS
             )
             
-            # Optional: Announce via TTS
-            if self.tts_engine:
-                try:
-                    hours = int(session_time_seconds // 3600)
-                    minutes = int((session_time_seconds % 3600) // 60)
-                    if hours > 0:
-                        time_str = f"{hours} hour{'s' if hours != 1 else ''}"
-                        if minutes > 0:
-                            time_str += f" and {minutes} minute{'s' if minutes != 1 else ''}"
-                    else:
-                        time_str = f"{minutes} minute{'s' if minutes != 1 else ''}"
-                    
-                    message = (
-                        f"You've been sitting for {time_str}. "
-                        f"I've set a {self.break_duration_seconds // 60}-minute break timer."
-                    )
-                    self.tts_engine.speak(message)
-                except Exception as e:
-                    print(f"Error announcing wellness timer: {e}")
+            if active_wellness_timers:
+                # Wellness timer already exists, don't create another
+                return None
             
-            return timer_id
+            # We've reached the threshold and no active timer exists
+            # This means either:
+            # 1. First trigger (last_trigger is None)
+            # 2. Previous timer expired, and we've reached next threshold period
             
-        except ValueError as e:
-            # Max timers reached or other error
-            print(f"Error creating wellness timer: {e}")
-            return None
+            # Create wellness break timer
+            try:
+                timer_id = self.timer_manager.set_timer(
+                    duration_seconds=self.break_duration_seconds,
+                    name=self.break_timer_name,
+                    timer_type=TimerManager.TIMER_TYPE_WELLNESS
+                )
+                
+                # Record when we triggered this timer (based on session time)
+                # This ensures we wait for another full threshold period before next trigger
+                self._last_trigger_session_time = session_time_seconds
+                
+                # Optional: Announce via TTS
+                if self.tts_engine:
+                    try:
+                        hours = int(session_time_seconds // 3600)
+                        minutes = int((session_time_seconds % 3600) // 60)
+                        if hours > 0:
+                            time_str = f"{hours} hour{'s' if hours != 1 else ''}"
+                            if minutes > 0:
+                                time_str += f" and {minutes} minute{'s' if minutes != 1 else ''}"
+                        else:
+                            time_str = f"{minutes} minute{'s' if minutes != 1 else ''}"
+                        
+                        message = (
+                            f"You've been sitting for {time_str}. "
+                            f"I've set a {self.break_duration_seconds // 60}-minute break timer."
+                        )
+                        self.tts_engine.speak(message)
+                    except Exception as e:
+                        print(f"Error announcing wellness timer: {e}")
+                
+                return timer_id
+                
+            except ValueError as e:
+                # Max timers reached or other error
+                print(f"Error creating wellness timer: {e}")
+                return None
+    
+    def reset_trigger_state(self):
+        """
+        Reset the wellness timer trigger state.
+        
+        Call this when starting a new session to reset the trigger tracking.
+        This allows the wellness timer to trigger again from the beginning
+        of the new session.
+        """
+        with self._trigger_lock:
+            self._last_trigger_session_time = None
     
     def get_config(self) -> dict:
         """
@@ -149,7 +183,6 @@ class WellnessTimerTrigger:
             session_time_getter: Callable that returns current session time in seconds
         """
         if self._monitoring_thread and self._monitoring_thread.is_alive():
-            print("Wellness timer monitoring already running")
             return
         
         self._session_time_getter = session_time_getter
@@ -172,7 +205,6 @@ class WellnessTimerTrigger:
         
         self._monitoring_thread = threading.Thread(target=monitor_loop, daemon=True)
         self._monitoring_thread.start()
-        print(f"Wellness timer background monitoring started (checking every {self.check_interval_seconds}s)")
     
     def stop_monitoring(self):
         """Stop background monitoring."""
@@ -180,7 +212,6 @@ class WellnessTimerTrigger:
             self._stop_monitoring.set()
             self._monitoring_thread.join(timeout=2.0)
             self._monitoring_thread = None
-            print("Wellness timer monitoring stopped")
     
     def is_monitoring(self) -> bool:
         """
