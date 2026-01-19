@@ -13,8 +13,12 @@ from time import sleep
 from typing import Optional, Dict, List
 from mqtt_api import MQTTAPI
 from mqtt_integration import MQTTIntegration
+from dotenv import load_dotenv
 import os
 import traceback
+
+# Load environment variables
+load_dotenv()
 
 
 # Configuration
@@ -291,10 +295,6 @@ def main():
     - WELLNESS_THRESHOLD_SECONDS: Sitting time threshold before wellness timer triggers
     - WELLNESS_BREAK_DURATION_SECONDS: Duration of wellness break timer
     """
-    from dotenv import load_dotenv
-    
-    load_dotenv()
-    
     # Check MQTT enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
     

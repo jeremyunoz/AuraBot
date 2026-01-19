@@ -86,14 +86,12 @@ class TimerManager:
                 "expiration_time": expiration_time,
                 "created_at": current_time,
                 "timer_type": timer_type,  # Track timer type
-                "thread": None  # Will be set by _start_timer_thread
             }
             
             self._timers[timer_id] = timer_data
             
-            # Start timer thread
-            timer_thread = self._start_timer_thread(timer_id, duration_seconds, timer_data["name"])
-            timer_data["thread"] = timer_thread
+            # Start timer thread (daemon thread, no need to store reference)
+            self._start_timer_thread(timer_id, duration_seconds, timer_data["name"])
         
         return timer_id
     
