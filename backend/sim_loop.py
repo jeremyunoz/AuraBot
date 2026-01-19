@@ -256,6 +256,13 @@ class AuraBot:
             except Exception as e:
                 print(f"Error stopping wellness timer monitoring: {e}")
         
+        # Stop sensor timeout monitoring
+        if self.mqtt_api:
+            try:
+                self.mqtt_api._stop_timeout_monitoring()
+            except Exception as e:
+                print(f"Error stopping sensor timeout monitoring: {e}")
+        
         # Stop MQTT integration
         if self.mqtt_integration:
             try:

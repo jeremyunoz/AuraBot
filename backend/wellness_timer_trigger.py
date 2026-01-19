@@ -58,6 +58,7 @@ class WellnessTimerTrigger:
         # Background monitoring
         self._monitoring_thread: Optional[threading.Thread] = None
         self._stop_monitoring = threading.Event()
+        self._pause_monitoring = threading.Event()  # Pause state for when user leaves
         self._session_time_getter: Optional[Callable[[], float]] = None
         
         # Track last wellness timer trigger to prevent continuous creation
@@ -187,10 +188,17 @@ class WellnessTimerTrigger:
         
         self._session_time_getter = session_time_getter
         self._stop_monitoring.clear()
+        self._pause_monitoring.clear()  # Start in active (unpaused) state
         
         def monitor_loop():
             """Background thread that periodically checks session time."""
             while not self._stop_monitoring.is_set():
+                # Check if monitoring is paused (user left area)
+                if self._pause_monitoring.is_set():
+                    # Wait while paused, but check stop event periodically
+                    self._stop_monitoring.wait(timeout=1.0)
+                    continue
+                
                 try:
                     if self._session_time_getter:
                         session_time = self._session_time_getter()
@@ -206,10 +214,38 @@ class WellnessTimerTrigger:
         self._monitoring_thread = threading.Thread(target=monitor_loop, daemon=True)
         self._monitoring_thread.start()
     
+    def pause_monitoring(self):
+        """
+        Pause wellness timer monitoring (user left area).
+        
+        Monitoring will stop checking for wellness timer triggers but
+        will preserve trigger state. Call resume_monitoring() when user returns.
+        """
+        self._pause_monitoring.set()
+    
+    def resume_monitoring(self):
+        """
+        Resume wellness timer monitoring (user returned).
+        
+        Monitoring will continue checking for wellness timer triggers
+        based on the preserved trigger state.
+        """
+        self._pause_monitoring.clear()
+    
+    def is_paused(self) -> bool:
+        """
+        Check if monitoring is currently paused.
+        
+        Returns:
+            bool: True if monitoring is paused, False otherwise
+        """
+        return self._pause_monitoring.is_set()
+    
     def stop_monitoring(self):
         """Stop background monitoring."""
         if self._monitoring_thread and self._monitoring_thread.is_alive():
             self._stop_monitoring.set()
+            self._pause_monitoring.clear()  # Clear pause state on stop
             self._monitoring_thread.join(timeout=2.0)
             self._monitoring_thread = None
     

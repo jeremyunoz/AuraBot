@@ -3,6 +3,8 @@ MQTT API module for AuraBot.
 Structured API for handling MQTT messages and integrating with AuraBot functionality.
 """
 
+import threading
+import time
 from typing import Dict, Optional
 from wellness_timer_trigger import WellnessTimerTrigger
 from timer_manager import TimerManager
@@ -52,6 +54,16 @@ class MQTTAPI:
         self._last_distance = None
         self._presence_threshold_cm = 50.0  # User considered present if distance < 50cm
         self._motion_threshold = 1.0  # Minimum motion value to consider active
+        
+        # Auto-pause timeout: if no sensor data for this duration, auto-pause session
+        # This prevents time accumulation if sensor data stops when user leaves
+        self._sensor_timeout_seconds = 30.0  # Auto-pause after 30 seconds of no sensor data
+        self._last_sensor_time: Optional[float] = None
+        self._timeout_check_thread: Optional[threading.Thread] = None
+        self._stop_timeout_check = threading.Event()
+        
+        # Start timeout monitoring
+        self._start_timeout_monitoring()
     
     def _handle_stop_session(self) -> Optional[Dict]:
         """
@@ -95,6 +107,9 @@ class MQTTAPI:
         distance = data.get("distance_cm", 0)
         motion = data.get("motion", 0)
         
+        # Update last sensor time for timeout monitoring
+        self._last_sensor_time = time.time()
+        
         response = {
             "status": "processed",
             "distance_cm": distance,
@@ -114,12 +129,21 @@ class MQTTAPI:
                 # Reset wellness timer trigger state for new session
                 if session_state_before == "idle":
                     self.wellness_trigger.reset_trigger_state()
+                    # Ensure monitoring is active for new session
+                    self.wellness_trigger.resume_monitoring()
+            
+            # Resume wellness timer monitoring if user returned (from paused state)
+            if session_state_before == "paused":
+                self.wellness_trigger.resume_monitoring()
         else:
             # User absent - pause session
             was_active = self.aurabot.pause_sitting_timer()
             if was_active:
                 response["actions"].append("session_paused")
                 print(f"Session paused: user left (distance: {distance:.1f}cm)")
+                
+                # Pause wellness timer monitoring when user leaves
+                self.wellness_trigger.pause_monitoring()
         
         # 2. Update response with current session time
         # Note: Wellness timer creation is handled by background monitoring thread
@@ -131,6 +155,46 @@ class MQTTAPI:
         self._last_distance = distance
         
         return response
+    
+    def _start_timeout_monitoring(self):
+        """Start background thread to monitor sensor data timeout and auto-pause."""
+        def timeout_check_loop():
+            """Background thread that checks for sensor data timeout."""
+            while not self._stop_timeout_check.is_set():
+                try:
+                    current_time = time.time()
+                    
+                    # Check if sensor data timeout occurred
+                    if (self._last_sensor_time is not None and 
+                        current_time - self._last_sensor_time > self._sensor_timeout_seconds):
+                        
+                        # Check if session is currently active
+                        session_state = self.aurabot.get_sitting_timer_state()
+                        if session_state == "active":
+                            # Auto-pause session due to sensor timeout
+                            was_active = self.aurabot.pause_sitting_timer()
+                            if was_active:
+                                print(f"Session auto-paused: no sensor data for {self._sensor_timeout_seconds:.0f} seconds")
+                                self.wellness_trigger.pause_monitoring()
+                                # Reset last sensor time to prevent repeated auto-pause
+                                self._last_sensor_time = None
+                
+                except Exception as e:
+                    print(f"Error in sensor timeout monitoring: {e}")
+                
+                # Check every 5 seconds
+                self._stop_timeout_check.wait(timeout=5.0)
+        
+        self._stop_timeout_check.clear()
+        self._timeout_check_thread = threading.Thread(target=timeout_check_loop, daemon=True)
+        self._timeout_check_thread.start()
+    
+    def _stop_timeout_monitoring(self):
+        """Stop sensor timeout monitoring."""
+        if self._timeout_check_thread and self._timeout_check_thread.is_alive():
+            self._stop_timeout_check.set()
+            self._timeout_check_thread.join(timeout=2.0)
+            self._timeout_check_thread = None
     
     def handle_control_command(self, data: dict) -> dict:
         """
