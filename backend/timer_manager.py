@@ -26,6 +26,10 @@ class TimerManager:
     DEFAULT_TIMER_NAME = "Timer"
     DEFAULT_NOTIFICATION_MESSAGE = "Your timer is up!"
     
+    # Timer types
+    TIMER_TYPE_USER = "user"        # Voice-requested timers
+    TIMER_TYPE_WELLNESS = "wellness" # Auto-triggered wellness timers
+    
     def __init__(self, tts_engine, logger, max_timers: int = None, session_data_file: Optional[str] = None):
         """
         Initialize the TimerManager.
@@ -47,13 +51,14 @@ class TimerManager:
         # Initialize session timer for tracking sitting time
         self.session_timer = SessionTimer(session_data_file)
     
-    def set_timer(self, duration_seconds: int, name: Optional[str] = None) -> str:
+    def set_timer(self, duration_seconds: int, name: Optional[str] = None, timer_type: str = TIMER_TYPE_USER) -> str:
         """
         Set a new timer.
         
         Args:
             duration_seconds: Duration in seconds (must be > 0)
             name: Optional name/label for the timer
+            timer_type: Type of timer ("user" for voice-requested, "wellness" for auto-triggered)
         
         Returns:
             str: Timer ID
@@ -80,6 +85,7 @@ class TimerManager:
                 "duration_seconds": duration_seconds,
                 "expiration_time": expiration_time,
                 "created_at": current_time,
+                "timer_type": timer_type,  # Track timer type
                 "thread": None  # Will be set by _start_timer_thread
             }
             
@@ -127,9 +133,12 @@ class TimerManager:
             self._timers.clear()
             return count
     
-    def get_active_timers(self) -> List[Dict]:
+    def get_active_timers(self, timer_type: Optional[str] = None) -> List[Dict]:
         """
         Get list of all active timers with current status.
+        
+        Args:
+            timer_type: Optional filter by timer type ("user" or "wellness")
         
         Returns:
             List[Dict]: List of timer dictionaries with time_remaining added
@@ -139,6 +148,10 @@ class TimerManager:
             current_time = time.time()
             
             for timer_id, timer_data in self._timers.items():
+                # Filter by type if specified
+                if timer_type and timer_data.get("timer_type") != timer_type:
+                    continue
+                
                 # Create a copy to avoid modifying the original
                 timer_info = timer_data.copy()
                 time_remaining = max(0, timer_data["expiration_time"] - current_time)
