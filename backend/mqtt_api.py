@@ -53,6 +53,20 @@ class MQTTAPI:
         self._presence_threshold_cm = 50.0  # User considered present if distance < 50cm
         self._motion_threshold = 1.0  # Minimum motion value to consider active
     
+    def _handle_stop_session(self) -> Optional[Dict]:
+        """
+        Handle session stop command and reset wellness timer trigger state.
+        
+        Returns:
+            Optional[Dict]: Session data if session existed, None otherwise
+        """
+        result = self.aurabot.stop_sitting_timer()
+        # Reset wellness timer trigger state when session is stopped
+        # This ensures new sessions start fresh
+        if result is not None:  # Session was actually stopped (not already idle)
+            self.wellness_trigger.reset_trigger_state()
+        return result
+    
     def handle_sensor_data(self, data: dict) -> dict:
         """
         Process sensor data from ESP32.
@@ -90,11 +104,16 @@ class MQTTAPI:
         
         # 1. Update session timer based on presence detection
         if distance < self._presence_threshold_cm:
-            # User detected - start/resume session
+            # Check if starting a new session (from IDLE state)
+            session_state_before = self.aurabot.get_sitting_timer_state()
             was_idle = self.aurabot.start_sitting_timer()
             if was_idle:
                 response["actions"].append("session_started")
                 print(f"Session started: user detected (distance: {distance:.1f}cm)")
+                
+                # Reset wellness timer trigger state for new session
+                if session_state_before == "idle":
+                    self.wellness_trigger.reset_trigger_state()
         else:
             # User absent - pause session
             was_active = self.aurabot.pause_sitting_timer()
@@ -102,31 +121,11 @@ class MQTTAPI:
                 response["actions"].append("session_paused")
                 print(f"Session paused: user left (distance: {distance:.1f}cm)")
         
-        # 2. Check if wellness timer should be auto-created
+        # 2. Update response with current session time
+        # Note: Wellness timer creation is handled by background monitoring thread
+        # to avoid duplicate checks from both sensor data and background monitoring
         current_session_time = self.aurabot.get_current_sitting_time()
         response["session_time_seconds"] = current_session_time
-        
-        # Debug: Show threshold and current time
-        config = self.wellness_trigger.get_config()
-        threshold = config["sitting_threshold_seconds"]
-        if current_session_time > 0:
-            print(f"[Wellness Check] Session time: {current_session_time:.1f}s / Threshold: {threshold}s ({current_session_time/threshold*100:.1f}%)")
-        
-        wellness_timer_id = self.wellness_trigger.check_and_trigger_wellness_timer(
-            current_session_time
-        )
-        
-        if wellness_timer_id:
-            response["actions"].append("wellness_timer_created")
-            response["wellness_timer_id"] = wellness_timer_id
-            print(f"✓ Wellness timer created: {wellness_timer_id}")
-        elif current_session_time >= threshold:
-            # Threshold reached but timer not created - likely already exists
-            existing_timers = self.timer_manager.get_active_timers(
-                timer_type=TimerManager.TIMER_TYPE_WELLNESS
-            )
-            if existing_timers:
-                print(f"[Wellness Check] Threshold reached but wellness timer already exists")
         
         # Update last distance
         self._last_distance = distance
@@ -155,7 +154,7 @@ class MQTTAPI:
             "start_session": lambda: self.aurabot.start_sitting_timer(),
             "pause_session": lambda: self.aurabot.pause_sitting_timer(),
             "resume_session": lambda: self.aurabot.start_sitting_timer(),  # same as start
-            "stop_session": lambda: self.aurabot.stop_sitting_timer(),
+            "stop_session": lambda: self._handle_stop_session(),
         }
         
         handler = handlers.get(cmd)
