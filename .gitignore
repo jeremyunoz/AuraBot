@@ -64,10 +64,8 @@ dmypy.json
 # Tests
 tests/
 
-ENVIRONMENT_OVERVIEW.md
-PHASE1_IMPLEMENTATION_SUMMARY.md
-TIMER_FEATURE_DESIGN.md
-SESSION_TIMER_DOCUMENTATION.md
+# Documentation
+docs/
 
 # Backend secrets
 backend/.env
