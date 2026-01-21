@@ -1,4 +1,5 @@
-speechrecognition>=3.10.0
-pyttsx3>=2.90
-paho-mqtt>=2.1.0
-python-dotenv>=1.0.0
+SpeechRecognition==3.14.3
+pyttsx3==2.99
+paho-mqtt==2.1.0
+python-dotenv==1.2.1
+PyAudio==0.2.14
