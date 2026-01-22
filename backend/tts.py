@@ -1,45 +1,78 @@
-import pyttsx3
-from time import sleep
 import platform
 import subprocess
 import threading
+import os
+from time import sleep
 
 """
-    Simulate Text-to-Speech feature
+    Text-to-Speech feature optimized for Raspberry Pi 5
+    Uses espeak-ng on Linux/Raspberry Pi (more reliable than pyttsx3)
+    Uses system 'say' command on macOS
 """
 
 class TTS:
     def __init__(self):
         self._use_system_say = False
+        self._use_espeak = False
         self._is_macos = platform.system() == "Darwin"
+        self._is_linux = platform.system() == "Linux"
         # Lock to prevent concurrent speech from multiple threads
         self._speak_lock = threading.Lock()
         
-        # On macOS, pyttsx3 often has issues after microphone use (completes but no audio)
-        # Use native 'say' command which is more reliable on macOS
+        # On macOS, use native 'say' command which is more reliable
         if self._is_macos:
             self._use_system_say = True
-            # Still initialize pyttsx3 as fallback, but don't use it by default
+            print("TTS: Using macOS 'say' command")
+        elif self._is_linux:
+            # On Linux/Raspberry Pi, use espeak-ng (more reliable than pyttsx3)
+            # Check if espeak-ng is available
             try:
-                self._engine = pyttsx3.init()
-            except:
-                self._engine = None
+                result = subprocess.run(
+                    ["which", "espeak-ng"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if result.returncode == 0:
+                    self._use_espeak = True
+                    print("TTS: Using espeak-ng (Raspberry Pi optimized)")
+                else:
+                    # Try espeak (older version)
+                    result = subprocess.run(
+                        ["which", "espeak"],
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    if result.returncode == 0:
+                        self._use_espeak = True
+                        self._espeak_cmd = "espeak"
+                        print("TTS: Using espeak (fallback)")
+                    else:
+                        print("Warning: espeak-ng not found. Install with: sudo apt-get install espeak-ng")
+                        raise RuntimeError("espeak-ng not available")
+            except Exception as e:
+                print(f"Error checking for espeak-ng: {e}")
+                raise
         else:
-            # On other platforms, use pyttsx3
+            # For other platforms, try pyttsx3 as fallback
             try:
+                import pyttsx3
                 self._engine = pyttsx3.init()
+                print("TTS: Using pyttsx3 (fallback)")
             except Exception as e:
                 print(f"Error initializing TTS engine: {e}")
                 raise
     
     def style(self):
-        if not self._use_system_say and self._engine:
+        # Style settings are applied per call for espeak and system say
+        # Only needed for pyttsx3 fallback
+        if hasattr(self, '_engine') and self._engine:
             try:
                 self._engine.setProperty("rate", 180)
                 self._engine.setProperty("volume", 0.9)
             except Exception as e:
                 print(f"Error setting TTS style: {e}")
-        # For system say, rate is set per call
 
     def speak(self, message):
         print(f"AuraBot: {message}")
@@ -50,82 +83,72 @@ class TTS:
     
     def _speak_impl(self, message):
         """Internal speak implementation (called with lock held)."""
-        # On macOS, use system say command if pyttsx3 isn't working reliably
+        # On macOS, use system say command
         if self._use_system_say:
             try:
                 # Use macOS say command with rate control (words per minute)
-                # Rate 180 in pyttsx3 is roughly equivalent to say -r 200
-                # Run in background to avoid blocking, but wait for completion
-                subprocess.run(["say", "-r", "200", message], check=True, 
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Rate 180 is roughly equivalent to say -r 200
+                subprocess.run(
+                    ["say", "-r", "200", message],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
                 return
             except Exception as e:
                 print(f"Error using system say: {e}")
-                # Fall through to try pyttsx3 as backup
-        
-        # Only use pyttsx3 if engine is available
-        if not self._engine:
-            # If no engine and system say failed, try to initialize pyttsx3
-            if self._is_macos:
-                try:
-                    self._engine = pyttsx3.init()
-                    self.style()
-                except:
-                    return
-            else:
                 return
         
-        try:
-            # Ensure properties are still set
+        # On Linux/Raspberry Pi, use espeak-ng
+        if self._use_espeak:
             try:
-                self.style()
-            except Exception as prop_error:
-                # If properties fail and on macOS, try system say instead
-                if self._is_macos:
-                    try:
-                        subprocess.run(["say", "-r", "200", message], check=True,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        return
-                    except:
-                        pass
-            
-            # Queue the message and run (no delays needed)
-            self._engine.say(message)
-            self._engine.runAndWait()
-            
-        except RuntimeError as e:
-            # RuntimeError can occur if engine is in use - try to recover
+                # espeak-ng parameters:
+                # -s: speed (words per minute), default 175, we use 180
+                # -a: amplitude (0-200), default 100, we use 90% = 180
+                # -v: voice (optional, can specify language/voice)
+                # -g: gap between words (0-10), default 0
+                espeak_cmd = getattr(self, '_espeak_cmd', 'espeak-ng')
+                subprocess.run(
+                    [espeak_cmd, "-s", "180", "-a", "180", message],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return
+            except subprocess.CalledProcessError as e:
+                print(f"Error using espeak-ng: {e}")
+                return
+            except FileNotFoundError:
+                print("Error: espeak-ng not found. Install with: sudo apt-get install espeak-ng")
+                return
+        
+        # Fallback to pyttsx3 for other platforms
+        if hasattr(self, '_engine') and self._engine:
             try:
-                # Reinitialize the engine
-                self._engine = pyttsx3.init()
                 self.style()
                 self._engine.say(message)
                 self._engine.runAndWait()
-            except Exception as e2:
-                # On macOS, fallback to system say command
-                if self._is_macos:
-                    try:
-                        subprocess.run(["say", "-r", "200", message], check=True,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except Exception as e3:
-                        print(f"Error using system say: {e3}")
-                else:
-                    print(f"Error reinitializing TTS engine: {e2}")
-        except Exception as e:
-            print(f"Error in speak method: {e}")
-            # On macOS, try system say as last resort
-            if self._is_macos:
+            except RuntimeError as e:
+                # RuntimeError can occur if engine is in use - try to recover
                 try:
-                    subprocess.run(["say", "-r", "200", message], check=True,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    import pyttsx3
+                    self._engine = pyttsx3.init()
+                    self.style()
+                    self._engine.say(message)
+                    self._engine.runAndWait()
                 except Exception as e2:
-                    print(f"Error using system say: {e2}")
+                    print(f"Error reinitializing TTS engine: {e2}")
+            except Exception as e:
+                print(f"Error in speak method: {e}")
+        else:
+            print("Error: No TTS engine available")
     
     def shutdown_tts(self):
-        if not self._use_system_say and self._engine:
+        # Only pyttsx3 needs explicit shutdown
+        if hasattr(self, '_engine') and self._engine and not self._use_system_say and not self._use_espeak:
             try:
                 self._engine.stop()
                 sleep(0.5)
             except Exception as e:
                 print(f"Error shutting down TTS: {e}")
-        # System say doesn't need shutdown
+        # espeak-ng and system say don't need shutdown
