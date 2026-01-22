@@ -1,5 +1,10 @@
 SpeechRecognition==3.14.3
-pyttsx3==2.99
+# pyttsx3 is optional - not used on Raspberry Pi (uses espeak-ng instead)
+# pyttsx3==2.99
 paho-mqtt==2.1.0
 python-dotenv==1.2.1
+# PyAudio is required for speech recognition
+# On Raspberry Pi, install system dependencies first:
+#   sudo apt-get update
+#   sudo apt-get install portaudio19-dev python3-pyaudio flac alsa-utils espeak-ng
 PyAudio==0.2.14
