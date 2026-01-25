@@ -8,3 +8,5 @@ python-dotenv==1.2.1
 #   sudo apt-get update
 #   sudo apt-get install portaudio19-dev python3-pyaudio flac alsa-utils espeak-ng
 PyAudio==0.2.14
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
