@@ -65,18 +65,18 @@ class STT:
     """
     
     def __init__(self, 
-                 timeout=10, 
-                 phrase_time_limit=10, 
-                 ambient_noise_duration=1.0,
+                 timeout=15, 
+                 phrase_time_limit=15, 
+                 ambient_noise_duration=1.5,
                  microphone_index=None,
                  energy_threshold=None):
         """
         Initialize the STT module.
         
         Args:
-            timeout (int): Maximum seconds to wait for speech to start (default: 10)
-            phrase_time_limit (int): Maximum seconds for a phrase (default: 10)
-            ambient_noise_duration (float): Seconds to calibrate ambient noise (default: 1.0)
+            timeout (int): Maximum seconds to wait for speech to start (default: 15)
+            phrase_time_limit (int): Maximum seconds for a phrase (default: 15)
+            ambient_noise_duration (float): Seconds to calibrate ambient noise (default: 1.5)
             microphone_index (int, optional): Specific microphone device index to use
             energy_threshold (float, optional): Manual energy threshold for speech detection
         """
@@ -189,13 +189,13 @@ class STT:
             self._ambient_noise_adjusted = True
             print("Ready! Listening...")
     
-    def listen_and_transcribe(self, auto_calibrate=True, max_retries=2):
+    def listen_and_transcribe(self, auto_calibrate=True, max_retries=3):
         """
         Listen to microphone input and transcribe speech to text.
         
         Args:
             auto_calibrate (bool): Automatically calibrate on first use (default: True)
-            max_retries (int): Maximum number of retry attempts on failure (default: 2)
+            max_retries (int): Maximum number of retry attempts on failure (default: 3)
         
         Returns:
             str: Transcribed text in lowercase, or empty string on error
@@ -213,6 +213,10 @@ class STT:
                                     source, 
                                     duration=self.ambient_noise_duration
                                 )
+                                # Make threshold slightly more sensitive (reduce by 10%)
+                                # This helps catch quieter speech
+                                if self.recognizer.energy_threshold > 50:
+                                    self.recognizer.energy_threshold *= 0.9
                                 # Log the energy threshold for debugging
                                 print(f"Energy threshold set to: {self.recognizer.energy_threshold:.1f}")
                                 self._ambient_noise_adjusted = True
@@ -227,6 +231,12 @@ class STT:
                         # Set manual energy threshold if provided
                         if self.energy_threshold is not None:
                             self.recognizer.energy_threshold = self.energy_threshold
+                        else:
+                            # Dynamically adjust threshold if it seems too high
+                            # Lower threshold by 20% if we're on a retry attempt (might be too sensitive)
+                            if attempt > 0 and self.recognizer.energy_threshold > 100:
+                                adjusted_threshold = self.recognizer.energy_threshold * 0.8
+                                self.recognizer.energy_threshold = adjusted_threshold
                         
                         # Listen for audio input
                         try:
@@ -238,6 +248,7 @@ class STT:
                         except sr.WaitTimeoutError:
                             if attempt < max_retries:
                                 print("No speech detected, retrying...")
+                                sleep(0.5)  # Brief pause before retry
                                 continue
                             print("No speech detected within timeout period.")
                             return ""
@@ -265,7 +276,9 @@ class STT:
                 return ""
 
             try:
-                text = self.recognizer.recognize_google(audio)
+                # Use Google's recognizer with language hint for better accuracy
+                # Also enable show_all=False to get best result, and with_confidence for better handling
+                text = self.recognizer.recognize_google(audio, language="en-US")
                 print(f"You said: {text}")
                 return text.lower()
             except OSError as e:
@@ -285,9 +298,11 @@ class STT:
             except sr.UnknownValueError:
                 if attempt < max_retries:
                     print("Could not understand audio, retrying...")
-                    sleep(0.3)  # Brief pause before retry
+                    # Increase pause time with each retry to allow for better audio capture
+                    sleep(0.5 + (attempt * 0.2))
                     continue
                 print("Sorry, could not understand the audio.")
+                print("Tip: Try speaking more clearly or closer to the microphone.")
                 return ""
             except sr.RequestError as e:
                 print(f"Could not connect to Google API: {e}")

@@ -68,18 +68,23 @@ class TimerParser:
                 return seconds
         
         # Pattern to match numbers with time units
-        # Matches: "5 minutes", "2.5 hours", "30 sec", "10m", etc.
-        pattern = r'(\d+(?:\.\d+)?)\s*([a-zA-Z]+)'
+        # Matches: "5 minutes", "2.5 hours", "30 sec", "10m", "5-minute", etc.
+        # Also handles hyphenated forms like "5-minute timer"
+        pattern = r'(\d+(?:\.\d+)?)\s*-?\s*([a-zA-Z]+)'
         matches = re.findall(pattern, text_lower)
         
         if not matches:
             # Try to match just numbers (assume minutes if no unit)
+            # But only if there are timer-related keywords nearby
             number_pattern = r'\b(\d+(?:\.\d+)?)\b'
             number_match = re.search(number_pattern, text_lower)
             if number_match:
-                # Default to minutes if no unit specified
-                minutes = float(number_match.group(1))
-                return int(minutes * 60)
+                # Check if there's context suggesting this is a timer duration
+                timer_context = any(word in text_lower for word in ['timer', 'minute', 'hour', 'second', 'set', 'create', 'make', 'go'])
+                if timer_context:
+                    # Default to minutes if no unit specified
+                    minutes = float(number_match.group(1))
+                    return int(minutes * 60)
             return None
         
         total_seconds = 0
@@ -211,44 +216,33 @@ class TimerParser:
             "success": False
         }
         
-        # Detect action type
-        if any(keyword in text_lower for keyword in ["set timer", "set a timer", "timer for", "countdown", "remind me"]):
-            result["action"] = "set"
-            
-            # Parse duration
-            duration = self.parse_duration(text_lower)
-            if duration:
-                result["duration_seconds"] = duration
-                result["success"] = True
-            
-            # Extract timer name
-            name = self.extract_timer_name(text_lower)
-            if name:
-                result["name"] = name
-        
-        elif any(keyword in text_lower for keyword in ["cancel timer", "stop timer", "delete timer", "remove timer", "cancel the", "stop the"]):
+        # Check cancel FIRST (before set) — cancel/stop/delete/remove are explicit.
+        # Set patterns match "timer" broadly, so we must prioritize cancel.
+        cancel_keywords = [
+            "cancel timer", "stop timer", "delete timer", "remove timer",
+            "cancel the", "stop the", "cancel my", "stop my",
+        ]
+        if any(kw in text_lower for kw in cancel_keywords):
             result["action"] = "cancel"
             result["success"] = True
-            
-            # Only try to extract timer name if there's a clear name pattern
-            # Don't extract names from "cancel the timer" or "cancel timer" (generic cancel)
-            # Only extract from patterns like "cancel the coffee timer" or "cancel coffee timer"
-            # Pattern: "cancel (the) <name> timer" - only extract if name exists before "timer"
-            cancel_name_pattern = r'(?:cancel|stop|delete|remove)\s+(?:the\s+)?([a-zA-Z]+(?:\s+[a-zA-Z]+)?)\s+timer\b'
+            cancel_name_pattern = r'(?:cancel|stop|delete|remove)\s+(?:the\s+|my\s+)?([a-zA-Z]+(?:\s+[a-zA-Z]+)?)\s+timer\b'
             match = re.search(cancel_name_pattern, text_lower)
             if match:
                 name = match.group(1).strip()
-                # Filter out conversational words and command words
-                conversational_words = {'can', 'you', 'send', 'me', 'the', 'set', 'a', 'an', 'my', 'please',
-                                      'could', 'would', 'will', 'help', 'create', 'make', 'give', 'cancel',
-                                      'stop', 'delete', 'remove', 'that', 'this', 'another', 'let', 'lets',
-                                      'best', 'way', 'for', 'to', 'do', 'want', 'need', 'get'}
-                words = name.split()
-                # Only extract if it's a meaningful name (1-2 words, not all conversational)
-                if name and 1 <= len(words) <= 2 and not all(word in conversational_words for word in words):
-                    result["name"] = name.title()
+                # Don't treat "timer" / "the" as a named timer — generic cancel
+                if name.lower() not in ("timer", "the", "a", "an"):
+                    conversational_words = {
+                        'can', 'you', 'send', 'me', 'the', 'set', 'a', 'an', 'my', 'please',
+                        'could', 'would', 'will', 'help', 'create', 'make', 'give', 'cancel',
+                        'stop', 'delete', 'remove', 'that', 'this', 'another', 'let', 'lets',
+                        'best', 'way', 'for', 'to', 'do', 'want', 'need', 'get'
+                    }
+                    words = name.split()
+                    if name and 1 <= len(words) <= 2 and not all(w in conversational_words for w in words):
+                        result["name"] = name.title()
+            return result
         
-        # Query patterns - more flexible matching
+        # Query patterns
         query_patterns = [
             r'\b(?:how\s+much\s+time|time\s+left|timer\s+status|timer\s+remaining)',
             r'\bwhat\s+is\s+(?:the\s+)?(?:current\s+)?timer',
@@ -256,23 +250,51 @@ class TimerParser:
             r'\bhow\s+long\s+(?:is\s+)?(?:my\s+)?(?:the\s+)?timer',
             r'\b(?:what\'?s?\s+|what\s+is\s+)(?:the\s+)?timer\s+(?:status|remaining|left)'
         ]
-        # Make sure "what time is it" doesn't match (time query, not timer query)
-        if any(re.search(pattern, text_lower) for pattern in query_patterns) and 'what time is it' not in text_lower:
+        if 'what time is it' not in text_lower and any(re.search(p, text_lower) for p in query_patterns):
             result["action"] = "query"
             result["success"] = True
+            return result
         
-        # List patterns - matches "list timer", "list the timer", "list my timer", etc.
+        # List patterns
         list_patterns = [
-            r'\blist\s+(?:the\s+)?(?:my\s+)?(?:active\s+)?timer(?:s)?\b',  # list timer, list the timer, list my timer, list active timer, list the active timer
+            r'\blist\s+(?:the\s+)?(?:my\s+)?(?:active\s+)?timer(?:s)?\b',
             r'\b(?:what|show)\s+timers?\s+(?:are\s+)?(?:running|active)?',
             r'\b(?:active\s+)?timers?\s+(?:are\s+)?(?:running|active)',
             r'\bshow\s+(?:me\s+)?(?:the\s+)?(?:active\s+)?timers?',
-            r'\bwhat\s+timers?\b(?!\s+is\s+it)',  # "what timers" but not "what time is it"
-            r'\bactive\s+timers?\b'  # standalone "active timers"
+            r'\bwhat\s+timers?\b(?!\s+is\s+it)',
+            r'\bactive\s+timers?\b',
         ]
-        if any(re.search(pattern, text_lower) for pattern in list_patterns):
+        if any(re.search(p, text_lower) for p in list_patterns):
             result["action"] = "list"
             result["success"] = True
+            return result
+        
+        # Set patterns — no standalone "timer"; require explicit set/create/make/go or duration+context
+        set_phrases = [
+            "set timer", "set a timer", "set an timer",
+            "timer for", "countdown", "remind me",
+            "create timer", "create a timer", "create an timer",
+            "make timer", "make a timer", "make an timer",
+            "start timer", "start a timer", "start an timer",
+            "go timer", "go a timer",
+        ]
+        has_set_phrase = any(phrase in text_lower for phrase in set_phrases)
+        has_duration = self.parse_duration(text_lower) is not None
+        has_timer_word = "timer" in text_lower
+        set_verbs = ["set", "create", "make", "start", "go", "begin"]
+        has_set_verb = any(v in text_lower for v in set_verbs)
+        
+        if has_set_phrase or (has_duration and (has_timer_word or has_set_verb)):
+            result["action"] = "set"
+            duration = self.parse_duration(text_lower)
+            if duration:
+                result["duration_seconds"] = duration
+                result["success"] = True
+            elif has_set_phrase:
+                result["success"] = False
+            name = self.extract_timer_name(text_lower)
+            if name:
+                result["name"] = name
         
         return result
     
