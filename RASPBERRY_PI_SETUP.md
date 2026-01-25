@@ -87,7 +87,15 @@ If you see: `OSError: FLAC conversion utility not available`
 4. If needed: `sudo usermod -a -G audio $USER` (then logout/login)
 
 ### MQTT Connection Errors
-MQTT "Not authorized" errors are separate from TTS/STT issues. Check your MQTT broker configuration and credentials.
+MQTT "Not authorized" errors mean the broker requires authentication. Use the same credentials as the backend (from `backend/.env`):
+
+- **`mosquitto_pub`**: Pass `-u <MQTT_USERNAME>` and `-P <MQTT_PASSWORD>`:
+  ```bash
+  mosquitto_pub -h localhost -t "aurabot/sensors" -m '{"distance_cm": 45.0, "motion": 1, "camera_confirmed": 1}' -u user -P YOUR_PASSWORD
+  ```
+  Replace `user` and `YOUR_PASSWORD` with your `MQTT_USERNAME` and `MQTT_PASSWORD` from `.env`.
+
+- **Backend**: Reads `MQTT_USERNAME` and `MQTT_PASSWORD` from `backend/.env` automatically.
 
 ## Running AuraBot
 
