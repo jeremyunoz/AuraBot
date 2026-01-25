@@ -37,11 +37,13 @@ class MQTTAPI:
         self.tts_engine = aurabot.tts_engine
         
         # Initialize wellness timer trigger with optional configuration
+        # Pass callback to clear debounce counters when wellness timer is created
         self.wellness_trigger = WellnessTimerTrigger(
             timer_manager=self.timer_manager,
             tts_engine=self.tts_engine,
             sitting_threshold_seconds=wellness_threshold_seconds,
-            break_duration_seconds=wellness_break_duration_seconds
+            break_duration_seconds=wellness_break_duration_seconds,
+            on_wellness_timer_created=self._clear_debounce_counters
         )
         
         # Start background monitoring of session time
@@ -72,6 +74,17 @@ class MQTTAPI:
         
         # Start timeout monitoring
         self._start_timeout_monitoring()
+    
+    def _clear_debounce_counters(self):
+        """
+        Clear debounce counters when wellness break starts.
+        
+        This ensures that after the break ends, we require fresh
+        consecutive sensor readings before resuming the session.
+        """
+        self._consecutive_present_count = 0
+        self._consecutive_absent_count = 0
+        print("Debounce counters cleared for wellness break")
     
     def _handle_stop_session(self) -> Optional[Dict]:
         """
@@ -131,6 +144,13 @@ class MQTTAPI:
             (distance < self._presence_threshold_cm and motion >= self._motion_threshold)
         )
         
+        # Check if wellness timer is active - if so, don't resume session timer
+        # User should complete the break before session resumes
+        active_wellness_timers = self.timer_manager.get_active_timers(
+            timer_type=TimerManager.TIMER_TYPE_WELLNESS
+        )
+        wellness_timer_active = len(active_wellness_timers) > 0
+        
         # Build response with current state
         response = {
             "status": "processed",
@@ -138,6 +158,7 @@ class MQTTAPI:
             "motion": motion,
             "camera_confirmed": camera_confirmed,
             "presence": is_present,
+            "wellness_timer_active": wellness_timer_active,
             "debounce": {
                 "consecutive_present": self._consecutive_present_count,
                 "consecutive_absent": self._consecutive_absent_count,
@@ -149,15 +170,21 @@ class MQTTAPI:
         
         # Debounce logic: track consecutive readings before changing state
         if is_present:
-            # Increment present counter, reset absent counter
-            self._consecutive_present_count += 1
-            self._consecutive_absent_count = 0
+            # Only increment counter if wellness timer is NOT active
+            # During wellness break, we don't count readings - they'll be reset when break starts
+            # and we'll require fresh consecutive readings after break ends
+            if not wellness_timer_active:
+                # Increment present counter, reset absent counter
+                self._consecutive_present_count += 1
+                self._consecutive_absent_count = 0
             # Update response with current counter values
             response["debounce"]["consecutive_present"] = self._consecutive_present_count
             response["debounce"]["consecutive_absent"] = self._consecutive_absent_count
             
             # Only trigger state change if we have enough consecutive present readings
-            if self._consecutive_present_count >= self._presence_stable_count:
+            # AND no wellness timer is active (user must complete break first)
+            if (self._consecutive_present_count >= self._presence_stable_count and 
+                not wellness_timer_active):
                 # Check if starting a new session (from IDLE state)
                 session_state_before = self.aurabot.get_sitting_timer_state()
                 was_idle = self.aurabot.start_sitting_timer()
@@ -177,6 +204,14 @@ class MQTTAPI:
                 # Resume wellness timer monitoring if user returned (from paused state)
                 if session_state_before == "paused":
                     self.wellness_trigger.resume_monitoring()
+            elif wellness_timer_active:
+                # User is present but wellness timer is active - don't resume session
+                # Counter is not incremented during break, so we'll need fresh readings after break ends
+                response["actions"].append("session_held_for_wellness_break")
+                print(
+                    f"Session resume blocked: wellness break active "
+                    f"(counter reset, will need {self._presence_stable_count} fresh consecutive readings after break)"
+                )
         else:
             # Increment absent counter, reset present counter
             self._consecutive_absent_count += 1
@@ -270,10 +305,27 @@ class MQTTAPI:
         if not cmd:
             return {"status": "error", "error": "Missing 'cmd' field"}
         
+        # Check if wellness timer is active before allowing session start/resume
+        active_wellness_timers = self.timer_manager.get_active_timers(
+            timer_type=TimerManager.TIMER_TYPE_WELLNESS
+        )
+        wellness_timer_active = len(active_wellness_timers) > 0
+        
+        # Define handlers with wellness timer check
+        def start_session_handler():
+            if wellness_timer_active:
+                return {"error": "Cannot start session during wellness break"}
+            return self.aurabot.start_sitting_timer()
+        
+        def resume_session_handler():
+            if wellness_timer_active:
+                return {"error": "Cannot resume session during wellness break"}
+            return self.aurabot.start_sitting_timer()
+        
         handlers = {
-            "start_session": lambda: self.aurabot.start_sitting_timer(),
+            "start_session": start_session_handler,
             "pause_session": lambda: self.aurabot.pause_sitting_timer(),
-            "resume_session": lambda: self.aurabot.start_sitting_timer(),  # same as start
+            "resume_session": resume_session_handler,
             "stop_session": lambda: self._handle_stop_session(),
         }
         
@@ -283,6 +335,13 @@ class MQTTAPI:
         
         try:
             result = handler()
+            # Check if handler returned an error dict
+            if isinstance(result, dict) and "error" in result:
+                return {
+                    "status": "error",
+                    "command": cmd,
+                    "error": result["error"]
+                }
             return {
                 "status": "success",
                 "command": cmd,

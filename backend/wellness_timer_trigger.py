@@ -29,7 +29,8 @@ class WellnessTimerTrigger:
                  sitting_threshold_seconds: Optional[int] = None,
                  break_duration_seconds: Optional[int] = None,
                  break_timer_name: Optional[str] = None,
-                 check_interval_seconds: int = DEFAULT_CHECK_INTERVAL_SECONDS):
+                 check_interval_seconds: int = DEFAULT_CHECK_INTERVAL_SECONDS,
+                 on_wellness_timer_created: Optional[Callable] = None):
         """
         Initialize the WellnessTimerTrigger.
         
@@ -40,9 +41,11 @@ class WellnessTimerTrigger:
             break_duration_seconds: Duration of break timer (default: 10 minutes)
             break_timer_name: Name for wellness break timers (default: "Wellness Break")
             check_interval_seconds: How often to check session time in background (default: 10 seconds)
+            on_wellness_timer_created: Optional callback called when wellness timer is created
         """
         self.timer_manager = timer_manager
         self.tts_engine = tts_engine
+        self.on_wellness_timer_created = on_wellness_timer_created
         
         self.sitting_threshold_seconds = (
             sitting_threshold_seconds or self.DEFAULT_SITTING_THRESHOLD_SECONDS
@@ -117,6 +120,19 @@ class WellnessTimerTrigger:
                     name=self.break_timer_name,
                     timer_type=TimerManager.TIMER_TYPE_WELLNESS
                 )
+                
+                # Pause session timer during wellness break
+                # This prevents session time from accumulating during the break
+                if self.timer_manager.session_timer.is_active():
+                    self.timer_manager.session_timer.pause()
+                    print(f"Session timer paused for wellness break")
+                
+                # Notify callback (e.g., to clear debounce counters)
+                if self.on_wellness_timer_created:
+                    try:
+                        self.on_wellness_timer_created()
+                    except Exception as e:
+                        print(f"Error in wellness timer created callback: {e}")
                 
                 # Record when we triggered this timer (based on session time)
                 # This ensures we wait for another full threshold period before next trigger

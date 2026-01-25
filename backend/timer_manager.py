@@ -229,9 +229,11 @@ class TimerManager:
             timer_id: Timer ID that expired
             name: Timer name for notification message
         """
-        # Remove timer from active list
+        # Get timer type before removing from active list
+        timer_type = None
         with self._timers_lock:
             if timer_id in self._timers:
+                timer_type = self._timers[timer_id].get("timer_type")
                 del self._timers[timer_id]
         
         # Create notification message
@@ -254,6 +256,12 @@ class TimerManager:
             )
         except Exception as e:
             print(f"Error logging timer expiration: {e}")
+        
+        # If wellness timer expired, session timer can resume
+        # But don't auto-resume - let presence detection handle it with proper debounce
+        # This ensures user must actually be present (not just one sensor reading)
+        if timer_type == self.TIMER_TYPE_WELLNESS:
+            print("Wellness break completed - session timer can resume when user presence is confirmed")
     
     def format_time_remaining(self, seconds: float) -> str:
         """
