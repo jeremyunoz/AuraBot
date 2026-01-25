@@ -4,6 +4,7 @@ import subprocess
 import os
 import sys
 from contextlib import contextmanager
+from time import sleep
 
 """
     Speech-to-Text module optimized for Raspberry Pi 5
@@ -64,18 +65,20 @@ class STT:
     """
     
     def __init__(self, 
-                 timeout=5, 
-                 phrase_time_limit=5, 
-                 ambient_noise_duration=0.5,
-                 microphone_index=None):
+                 timeout=10, 
+                 phrase_time_limit=10, 
+                 ambient_noise_duration=1.0,
+                 microphone_index=None,
+                 energy_threshold=None):
         """
         Initialize the STT module.
         
         Args:
-            timeout (int): Maximum seconds to wait for speech to start (default: 5)
-            phrase_time_limit (int): Maximum seconds for a phrase (default: 5)
-            ambient_noise_duration (float): Seconds to calibrate ambient noise (default: 0.5)
+            timeout (int): Maximum seconds to wait for speech to start (default: 10)
+            phrase_time_limit (int): Maximum seconds for a phrase (default: 10)
+            ambient_noise_duration (float): Seconds to calibrate ambient noise (default: 1.0)
             microphone_index (int, optional): Specific microphone device index to use
+            energy_threshold (float, optional): Manual energy threshold for speech detection
         """
         # On Raspberry Pi/Linux, check audio configuration
         self._is_linux = platform.system() == "Linux"
@@ -107,6 +110,7 @@ class STT:
         self.timeout = timeout
         self.phrase_time_limit = phrase_time_limit
         self.ambient_noise_duration = ambient_noise_duration
+        self.energy_threshold = energy_threshold
         self._ambient_noise_adjusted = False
     
     def _check_audio_config(self):
@@ -185,85 +189,115 @@ class STT:
             self._ambient_noise_adjusted = True
             print("Ready! Listening...")
     
-    def listen_and_transcribe(self, auto_calibrate=True):
+    def listen_and_transcribe(self, auto_calibrate=True, max_retries=2):
         """
         Listen to microphone input and transcribe speech to text.
         
         Args:
             auto_calibrate (bool): Automatically calibrate on first use (default: True)
+            max_retries (int): Maximum number of retry attempts on failure (default: 2)
         
         Returns:
             str: Transcribed text in lowercase, or empty string on error
         """
-        try:
-            # Suppress ALSA/JACK warnings during all microphone operations
-            with suppress_stderr():
-                with self.mic as source:
-                    # Only adjust for ambient noise once at startup (saves 1-2 seconds per interaction)
-                    if auto_calibrate and not self._ambient_noise_adjusted:
-                        print("Calibrating microphone...")
+        for attempt in range(max_retries + 1):
+            try:
+                # Suppress ALSA/JACK warnings during all microphone operations
+                with suppress_stderr():
+                    with self.mic as source:
+                        # Only adjust for ambient noise once at startup (saves 1-2 seconds per interaction)
+                        if auto_calibrate and not self._ambient_noise_adjusted:
+                            print("Calibrating microphone...")
+                            try:
+                                self.recognizer.adjust_for_ambient_noise(
+                                    source, 
+                                    duration=self.ambient_noise_duration
+                                )
+                                # Log the energy threshold for debugging
+                                print(f"Energy threshold set to: {self.recognizer.energy_threshold:.1f}")
+                                self._ambient_noise_adjusted = True
+                                print("Ready! Listening...")
+                            except Exception as e:
+                                print(f"Warning: Could not calibrate microphone: {e}")
+                                print("Continuing without calibration...")
+                                self._ambient_noise_adjusted = True  # Mark as attempted
+                        else:
+                            print("\nListening...")
+                        
+                        # Set manual energy threshold if provided
+                        if self.energy_threshold is not None:
+                            self.recognizer.energy_threshold = self.energy_threshold
+                        
+                        # Listen for audio input
                         try:
-                            self.recognizer.adjust_for_ambient_noise(
+                            audio = self.recognizer.listen(
                                 source, 
-                                duration=self.ambient_noise_duration
+                                timeout=self.timeout, 
+                                phrase_time_limit=self.phrase_time_limit
                             )
-                            self._ambient_noise_adjusted = True
-                            print("Ready! Listening...")
-                        except Exception as e:
-                            print(f"Warning: Could not calibrate microphone: {e}")
-                            print("Continuing without calibration...")
-                            self._ambient_noise_adjusted = True  # Mark as attempted
-                    else:
-                        print("\nListening...")
-                    
-                    # Listen for audio input
-                    try:
-                        audio = self.recognizer.listen(
-                            source, 
-                            timeout=self.timeout, 
-                            phrase_time_limit=self.phrase_time_limit
-                        )
-                    except sr.WaitTimeoutError:
-                        print("No speech detected within timeout period.")
-                        return ""
-                    except OSError as e:
-                        print(f"Audio device error: {e}")
-                        if self._is_linux:
-                            print("On Raspberry Pi, you may need to:")
-                            print("  1. Check microphone permissions")
-                            print("  2. Verify audio device: arecord -l")
-                            print("  3. Test recording: arecord -d 3 test.wav")
-                        return ""
-        except Exception as e:
-            print(f"Error accessing microphone: {e}")
-            if self._is_linux:
-                print("Troubleshooting tips for Raspberry Pi:")
-                print("  - Ensure microphone is connected and recognized")
-                print("  - Check audio permissions in /etc/group (audio group)")
-                print("  - Try: sudo usermod -a -G audio $USER (then logout/login)")
-            return ""
-
-        try:
-            text = self.recognizer.recognize_google(audio)
-            print(f"You said: {text}")
-            return text.lower()
-        except OSError as e:
-            # Handle FLAC missing error specifically
-            if "FLAC" in str(e) or "flac" in str(e).lower():
-                print("Error: FLAC conversion utility not available.")
-                print("Install with: sudo apt-get install flac")
+                        except sr.WaitTimeoutError:
+                            if attempt < max_retries:
+                                print("No speech detected, retrying...")
+                                continue
+                            print("No speech detected within timeout period.")
+                            return ""
+                        except OSError as e:
+                            print(f"Audio device error: {e}")
+                            if self._is_linux:
+                                print("On Raspberry Pi, you may need to:")
+                                print("  1. Check microphone permissions")
+                                print("  2. Verify audio device: arecord -l")
+                                print("  3. Test recording: arecord -d 3 test.wav")
+                            if attempt < max_retries:
+                                sleep(0.5)  # Brief delay before retry
+                                continue
+                            return ""
+            except Exception as e:
+                print(f"Error accessing microphone: {e}")
                 if self._is_linux:
-                    print("After installing, restart the application.")
-            else:
-                print(f"Audio processing error: {e}")
-            return ""
-        except sr.UnknownValueError:
-            print("Sorry, could not understand the audio.")
-            return ""
-        except sr.RequestError as e:
-            print(f"Could not connect to Google API: {e}")
-            print("Check your internet connection.")
-            return ""
+                    print("Troubleshooting tips for Raspberry Pi:")
+                    print("  - Ensure microphone is connected and recognized")
+                    print("  - Check audio permissions in /etc/group (audio group)")
+                    print("  - Try: sudo usermod -a -G audio $USER (then logout/login)")
+                if attempt < max_retries:
+                    sleep(0.5)
+                    continue
+                return ""
+
+            try:
+                text = self.recognizer.recognize_google(audio)
+                print(f"You said: {text}")
+                return text.lower()
+            except OSError as e:
+                # Handle FLAC missing error specifically
+                if "FLAC" in str(e) or "flac" in str(e).lower():
+                    print("Error: FLAC conversion utility not available.")
+                    print("Install with: sudo apt-get install flac")
+                    if self._is_linux:
+                        print("After installing, restart the application.")
+                    return ""
+                else:
+                    print(f"Audio processing error: {e}")
+                    if attempt < max_retries:
+                        sleep(0.5)
+                        continue
+                    return ""
+            except sr.UnknownValueError:
+                if attempt < max_retries:
+                    print("Could not understand audio, retrying...")
+                    sleep(0.3)  # Brief pause before retry
+                    continue
+                print("Sorry, could not understand the audio.")
+                return ""
+            except sr.RequestError as e:
+                print(f"Could not connect to Google API: {e}")
+                print("Check your internet connection.")
+                if attempt < max_retries:
+                    sleep(1.0)  # Longer delay for network issues
+                    continue
+                return ""
+        
+        return ""  # All retries exhausted
     
     def reset_calibration(self):
         """
@@ -271,6 +305,50 @@ class STT:
         Useful if microphone conditions change significantly.
         """
         self._ambient_noise_adjusted = False
+    
+    def set_energy_threshold(self, threshold):
+        """
+        Manually set the energy threshold for speech detection.
+        Lower values = more sensitive (may pick up background noise)
+        Higher values = less sensitive (may miss quiet speech)
+        
+        Args:
+            threshold (float): Energy threshold value
+        """
+        self.recognizer.energy_threshold = threshold
+        self.energy_threshold = threshold
+        print(f"Energy threshold set to: {threshold:.1f}")
+    
+    def get_energy_threshold(self):
+        """Get the current energy threshold."""
+        return self.recognizer.energy_threshold
+    
+    def test_microphone_sensitivity(self):
+        """
+        Test microphone and suggest optimal energy threshold.
+        Run this to find the best threshold for your environment.
+        """
+        print("Testing microphone sensitivity...")
+        print("Please speak normally for a few seconds...")
+        
+        with suppress_stderr():
+            with self.mic as source:
+                # Get ambient noise level
+                self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
+                ambient_threshold = self.recognizer.energy_threshold
+                print(f"Ambient noise threshold: {ambient_threshold:.1f}")
+                
+                # Test with speech
+                print("Now speak a sentence...")
+                try:
+                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=5)
+                    # Check audio energy
+                    import audioop
+                    rms = audioop.rms(audio.get_raw_data(), audio.sample_width)
+                    print(f"Speech RMS energy: {rms:.1f}")
+                    print(f"Suggested threshold: {max(ambient_threshold * 1.5, rms * 0.5):.1f}")
+                except sr.WaitTimeoutError:
+                    print("No speech detected during test.")
 
 
 # Backward compatibility: Create a default instance and expose the function

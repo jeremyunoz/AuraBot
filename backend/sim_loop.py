@@ -24,7 +24,7 @@ load_dotenv()
 # Configuration
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "stt_tts_test.log")
-AUDIO_HANDOFF_DELAY = 0.1  # Delay for audio device handoff
+AUDIO_HANDOFF_DELAY = 0.5  # Delay for audio device handoff
 SHUTDOWN_DELAY = 0.5  # Delay before shutdown
 
 
