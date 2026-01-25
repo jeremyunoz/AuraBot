@@ -13,6 +13,7 @@ from time import sleep
 from typing import Optional, Dict, List
 from mqtt_api import MQTTAPI
 from mqtt_integration import MQTTIntegration
+from dashboard_api import run_dashboard
 from dotenv import load_dotenv
 import os
 import traceback
@@ -323,11 +324,21 @@ def main():
             minutes = break_duration // 60
             print(f"  Break duration: {break_duration}s ({minutes}m)")
     
-    AuraBot(
+    # Create AuraBot instance
+    bot = AuraBot(
         enable_mqtt=enable_mqtt,
         wellness_threshold_seconds=wellness_threshold,
         wellness_break_duration_seconds=break_duration
-    ).start()
+    )
+    
+    # Start dashboard in background thread
+    dashboard_port = int(os.getenv("DASHBOARD_PORT", "8000"))
+    dashboard_thread = run_dashboard(bot, host="0.0.0.0", port=dashboard_port)
+    print(f"Dashboard started at http://0.0.0.0:{dashboard_port}")
+    print(f"  Access locally: http://localhost:{dashboard_port}")
+    
+    # Start the main AuraBot conversation loop (blocks)
+    bot.start()
 
 
 if __name__ == "__main__":

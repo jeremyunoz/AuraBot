@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraBot Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 AuraBot Dashboard</h1>
+            <div class="status-indicator">
+                <span id="mqtt-status" class="status-badge">MQTT: Unknown</span>
+            </div>
+        </header>
+
+        <main>
+            <!-- Session Section -->
+            <section class="card">
+                <h2>Session</h2>
+                <div class="session-info">
+                    <div class="info-row">
+                        <span class="label">State:</span>
+                        <span id="session-state" class="value state-idle">idle</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">Current Time:</span>
+                        <span id="session-time" class="value">0 seconds</span>
+                    </div>
+                </div>
+                <div class="controls">
+                    <button id="btn-start" class="btn btn-primary">Start Session</button>
+                    <button id="btn-pause" class="btn btn-secondary">Pause</button>
+                    <button id="btn-resume" class="btn btn-secondary">Resume</button>
+                    <button id="btn-stop" class="btn btn-danger">Stop Session</button>
+                </div>
+            </section>
+
+            <!-- Timers Section -->
+            <section class="card">
+                <h2>Active Timers</h2>
+                <div id="timers-summary" class="summary">
+                    <span>Total: <strong id="timer-total">0</strong></span>
+                    <span>User: <strong id="timer-user">0</strong></span>
+                    <span>Wellness: <strong id="timer-wellness">0</strong></span>
+                </div>
+                <div id="timers-list" class="timers-list">
+                    <p class="empty-state">No active timers</p>
+                </div>
+            </section>
+
+            <!-- Wellness Config Section -->
+            <section class="card">
+                <h2>Wellness Configuration</h2>
+                <div id="wellness-config" class="config-info">
+                    <div class="info-row">
+                        <span class="label">Sitting Threshold:</span>
+                        <span id="wellness-threshold" class="value">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">Break Duration:</span>
+                        <span id="wellness-duration" class="value">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">Break Timer Name:</span>
+                        <span id="wellness-name" class="value">-</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Session History Section -->
+            <section class="card">
+                <h2>Session History</h2>
+                <div id="sessions-list" class="sessions-list">
+                    <p class="empty-state">Loading...</p>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
