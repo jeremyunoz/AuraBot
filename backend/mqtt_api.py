@@ -52,8 +52,16 @@ class MQTTAPI:
         
         # Sensor state tracking
         self._last_distance = None
+        self._last_motion = None
+        self._last_camera_confirmed = None
         self._presence_threshold_cm = 50.0  # User considered present if distance < 50cm
         self._motion_threshold = 1.0  # Minimum motion value to consider active
+        
+        # Debounce configuration: require N consecutive readings before state change
+        self._presence_stable_count = 2  # Need 2 consecutive "present" readings to start session
+        self._absence_stable_count = 2  # Need 2 consecutive "absent" readings to pause session
+        self._consecutive_present_count = 0  # Track consecutive present readings
+        self._consecutive_absent_count = 0  # Track consecutive absent readings
         
         # Auto-pause timeout: if no sensor data for this duration, auto-pause session
         # This prevents time accumulation if sensor data stops when user leaves
@@ -77,6 +85,9 @@ class MQTTAPI:
         # This ensures new sessions start fresh
         if result is not None:  # Session was actually stopped (not already idle)
             self.wellness_trigger.reset_trigger_state()
+            # Reset debounce counters for clean state
+            self._consecutive_present_count = 0
+            self._consecutive_absent_count = 0
         return result
     
     def handle_sensor_data(self, data: dict) -> dict:
@@ -85,14 +96,15 @@ class MQTTAPI:
         
         Expected format:
         {
-            "motion": float,
+            "motion": 0 | 1,
+            "camera_confirmed": 0 | 1,  # or "camera": 0 | 1
             "distance_cm": float,
             "ts_us": int (optional),
             "count": int (optional)
         }
         
         Flow:
-        1. Detect user presence based on distance
+        1. Detect user presence based on camera/motion/distance
         2. Start/pause session timer accordingly
         3. Check session time and auto-create wellness timer if needed
         
@@ -104,46 +116,88 @@ class MQTTAPI:
             return {"status": "error", "error": "Invalid sensor data"}
         
         # Extract values
-        distance = data.get("distance_cm", 0)
-        motion = data.get("motion", 0)
+        distance = float(data.get("distance_cm", 0))
+        motion = self._coerce_binary(data.get("motion"))
+        camera_confirmed = self._coerce_binary(
+            data.get("camera_confirmed", data.get("camera"))
+        )
         
         # Update last sensor time for timeout monitoring
         self._last_sensor_time = time.time()
         
+        # 1. Calculate presence based on camera/motion/distance
+        is_present = (
+            camera_confirmed == 1 or
+            (distance < self._presence_threshold_cm and motion >= self._motion_threshold)
+        )
+        
+        # Build response with current state
         response = {
             "status": "processed",
             "distance_cm": distance,
             "motion": motion,
+            "camera_confirmed": camera_confirmed,
+            "presence": is_present,
+            "debounce": {
+                "consecutive_present": self._consecutive_present_count,
+                "consecutive_absent": self._consecutive_absent_count,
+                "presence_stable_count": self._presence_stable_count,
+                "absence_stable_count": self._absence_stable_count
+            },
             "actions": []
         }
         
-        # 1. Update session timer based on presence detection
-        if distance < self._presence_threshold_cm:
-            # Check if starting a new session (from IDLE state)
-            session_state_before = self.aurabot.get_sitting_timer_state()
-            was_idle = self.aurabot.start_sitting_timer()
-            if was_idle:
-                response["actions"].append("session_started")
-                print(f"Session started: user detected (distance: {distance:.1f}cm)")
-                
-                # Reset wellness timer trigger state for new session
-                if session_state_before == "idle":
-                    self.wellness_trigger.reset_trigger_state()
-                    # Ensure monitoring is active for new session
-                    self.wellness_trigger.resume_monitoring()
+        # Debounce logic: track consecutive readings before changing state
+        if is_present:
+            # Increment present counter, reset absent counter
+            self._consecutive_present_count += 1
+            self._consecutive_absent_count = 0
+            # Update response with current counter values
+            response["debounce"]["consecutive_present"] = self._consecutive_present_count
+            response["debounce"]["consecutive_absent"] = self._consecutive_absent_count
             
-            # Resume wellness timer monitoring if user returned (from paused state)
-            if session_state_before == "paused":
-                self.wellness_trigger.resume_monitoring()
-        else:
-            # User absent - pause session
-            was_active = self.aurabot.pause_sitting_timer()
-            if was_active:
-                response["actions"].append("session_paused")
-                print(f"Session paused: user left (distance: {distance:.1f}cm)")
+            # Only trigger state change if we have enough consecutive present readings
+            if self._consecutive_present_count >= self._presence_stable_count:
+                # Check if starting a new session (from IDLE state)
+                session_state_before = self.aurabot.get_sitting_timer_state()
+                was_idle = self.aurabot.start_sitting_timer()
+                if was_idle:
+                    response["actions"].append("session_started")
+                    print(
+                        f"Session started: user detected (stable for {self._consecutive_present_count} readings) "
+                        f"(distance: {distance:.1f}cm, motion: {motion}, camera: {camera_confirmed})"
+                    )
+                    
+                    # Reset wellness timer trigger state for new session
+                    if session_state_before == "idle":
+                        self.wellness_trigger.reset_trigger_state()
+                        # Ensure monitoring is active for new session
+                        self.wellness_trigger.resume_monitoring()
                 
-                # Pause wellness timer monitoring when user leaves
-                self.wellness_trigger.pause_monitoring()
+                # Resume wellness timer monitoring if user returned (from paused state)
+                if session_state_before == "paused":
+                    self.wellness_trigger.resume_monitoring()
+        else:
+            # Increment absent counter, reset present counter
+            self._consecutive_absent_count += 1
+            self._consecutive_present_count = 0
+            # Update response with current counter values
+            response["debounce"]["consecutive_present"] = self._consecutive_present_count
+            response["debounce"]["consecutive_absent"] = self._consecutive_absent_count
+            
+            # Only trigger state change if we have enough consecutive absent readings
+            if self._consecutive_absent_count >= self._absence_stable_count:
+                # User absent - pause session
+                was_active = self.aurabot.pause_sitting_timer()
+                if was_active:
+                    response["actions"].append("session_paused")
+                    print(
+                        f"Session paused: user left (stable for {self._consecutive_absent_count} readings) "
+                        f"(distance: {distance:.1f}cm, motion: {motion}, camera: {camera_confirmed})"
+                    )
+                    
+                    # Pause wellness timer monitoring when user leaves
+                    self.wellness_trigger.pause_monitoring()
         
         # 2. Update response with current session time
         # Note: Wellness timer creation is handled by background monitoring thread
@@ -151,8 +205,10 @@ class MQTTAPI:
         current_session_time = self.aurabot.get_current_sitting_time()
         response["session_time_seconds"] = current_session_time
         
-        # Update last distance
+        # Update last sensor readings
         self._last_distance = distance
+        self._last_motion = motion
+        self._last_camera_confirmed = camera_confirmed
         
         return response
     
@@ -336,7 +392,10 @@ class MQTTAPI:
             return False
         
         # Check for required fields
-        if "distance_cm" not in data:
+        if "distance_cm" not in data or "motion" not in data:
+            return False
+        
+        if "camera_confirmed" not in data and "camera" not in data:
             return False
         
         # Validate types
@@ -347,7 +406,35 @@ class MQTTAPI:
         except (ValueError, TypeError):
             return False
         
+        motion = self._coerce_binary(data.get("motion"))
+        if motion is None:
+            return False
+        
+        camera_confirmed = self._coerce_binary(
+            data.get("camera_confirmed", data.get("camera"))
+        )
+        if camera_confirmed is None:
+            return False
+        
         return True
+    
+    def _coerce_binary(self, value) -> Optional[int]:
+        """
+        Normalize a 0/1-like value to int 0/1.
+        
+        Returns None for invalid values.
+        """
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value if value in (0, 1) else None
+        if isinstance(value, float):
+            return int(value) if value in (0.0, 1.0) else None
+        if isinstance(value, str):
+            value = value.strip()
+            if value in ("0", "1"):
+                return int(value)
+        return None
     
     def update_presence_threshold(self, threshold_cm: float):
         """
@@ -367,4 +454,38 @@ class MQTTAPI:
             float: Threshold in centimeters
         """
         return self._presence_threshold_cm
+    
+    def update_debounce_config(self, 
+                                presence_stable_count: Optional[int] = None,
+                                absence_stable_count: Optional[int] = None):
+        """
+        Update debounce configuration for presence detection.
+        
+        Args:
+            presence_stable_count: Number of consecutive "present" readings required to start session
+                                 (None to keep current value, must be >= 1)
+            absence_stable_count: Number of consecutive "absent" readings required to pause session
+                                 (None to keep current value, must be >= 1)
+        """
+        if presence_stable_count is not None and presence_stable_count >= 1:
+            self._presence_stable_count = presence_stable_count
+            # Reset counter when config changes
+            self._consecutive_present_count = 0
+        
+        if absence_stable_count is not None and absence_stable_count >= 1:
+            self._absence_stable_count = absence_stable_count
+            # Reset counter when config changes
+            self._consecutive_absent_count = 0
+    
+    def get_debounce_config(self) -> dict:
+        """
+        Get current debounce configuration.
+        
+        Returns:
+            dict: Configuration with presence_stable_count and absence_stable_count
+        """
+        return {
+            "presence_stable_count": self._presence_stable_count,
+            "absence_stable_count": self._absence_stable_count
+        }
 
