@@ -3,6 +3,9 @@ import platform
 import subprocess
 import os
 import sys
+import pyaudio
+import numpy as np
+import threading
 from contextlib import contextmanager
 from time import sleep
 
@@ -65,19 +68,19 @@ class STT:
     """
     
     def __init__(self, 
-                 timeout=15, 
-                 phrase_time_limit=15, 
+                 timeout=8, 
+                 phrase_time_limit=8, 
                  ambient_noise_duration=1.5,
                  microphone_index=None,
                  energy_threshold=None):
         """
-        Initialize the STT module.
+        Initialize the STT module with PyAudio for ReSpeaker device.
         
         Args:
-            timeout (int): Maximum seconds to wait for speech to start (default: 15)
-            phrase_time_limit (int): Maximum seconds for a phrase (default: 15)
+            timeout (int): Maximum seconds to wait for speech to start (default: 8)
+            phrase_time_limit (int): Maximum seconds for a phrase (default: 8)
             ambient_noise_duration (float): Seconds to calibrate ambient noise (default: 1.5)
-            microphone_index (int, optional): Specific microphone device index to use
+            microphone_index (int, optional): Specific microphone device index to use (default: 0 for ReSpeaker)
             energy_threshold (float, optional): Manual energy threshold for speech detection
         """
         # On Raspberry Pi/Linux, check audio configuration
@@ -85,33 +88,40 @@ class STT:
         if self._is_linux:
             self._check_audio_config()
         
-        # Initialize recognizer and microphone (suppress ALSA/JACK warnings during initialization)
-        # These warnings are harmless - PyAudio probes for audio backends that may not exist
+        # ReSpeaker configuration
+        self.RESPEAKER_RATE = 16000
+        self.RESPEAKER_CHANNELS = 2
+        self.RESPEAKER_WIDTH = 2
+        self.RESPEAKER_INDEX = microphone_index if microphone_index is not None else 0  # Default to ReSpeaker index 0
+        self.CHUNK = 1024
+        
+        # Thread safety lock for PyAudio operations
+        self._pyaudio_lock = threading.Lock()
+        
+        # Initialize recognizer (suppress ALSA/JACK warnings during initialization)
         try:
             with suppress_stderr():
                 self.recognizer = sr.Recognizer()
-                if microphone_index is not None:
-                    self.mic = sr.Microphone(device_index=microphone_index)
-                else:
-                    self.mic = sr.Microphone()
         except Exception as e:
-            print(f"Warning: Error initializing microphone: {e}")
-            print("Attempting to list available microphones...")
-            self._list_microphones()
-            # Try default microphone anyway
-            try:
-                with suppress_stderr():
-                    self.mic = sr.Microphone()
-            except Exception as e2:
-                print(f"Error: Could not initialize microphone: {e2}")
-                print("Please check your audio configuration.")
-                raise
+            print(f"Warning: Error initializing recognizer: {e}")
+            raise
+        
+        # Initialize PyAudio instance (will be reused, not closed until cleanup)
+        try:
+            with suppress_stderr():
+                self.pyaudio_instance = pyaudio.PyAudio()
+        except Exception as e:
+            print(f"Error: Could not initialize PyAudio: {e}")
+            print("Please check your audio configuration.")
+            raise
         
         self.timeout = timeout
         self.phrase_time_limit = phrase_time_limit
         self.ambient_noise_duration = ambient_noise_duration
         self.energy_threshold = energy_threshold
         self._ambient_noise_adjusted = False
+        self._stream = None  # Persistent stream that stays open between recordings
+        self._stream_initialized = False  # Track if stream has been successfully initialized
     
     def _check_audio_config(self):
         """Check and provide guidance on audio configuration for Raspberry Pi."""
@@ -166,32 +176,191 @@ class STT:
     def _list_microphones(self):
         """List available microphone devices for debugging."""
         try:
-            mic_list = sr.Microphone.list_microphone_names()
-            print(f"Available microphones ({len(mic_list)}):")
-            for i, name in enumerate(mic_list):
-                print(f"  [{i}] {name}")
+            with suppress_stderr():
+                p = pyaudio.PyAudio()
+                print(f"Available audio input devices:")
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info['maxInputChannels'] > 0:
+                        print(f"  [{i}] {info['name']} (channels: {info['maxInputChannels']})")
+                p.terminate()
         except Exception as e:
             print(f"Could not list microphones: {e}")
+    
+    def _ensure_stream_open(self):
+        """
+        Ensure the audio stream is open and ready. Reuses existing stream if available.
+        This eliminates the need to reopen the stream for each recording, reducing delays.
+        """
+        # Check if stream already exists and is active
+        if self._stream is not None:
+            try:
+                if self._stream.is_active():
+                    # Stream is already open and active, no need to recreate
+                    return True
+                else:
+                    # Stream exists but is not active, close it and recreate
+                    try:
+                        with suppress_stderr():
+                            self._stream.stop_stream()
+                            self._stream.close()
+                    except:
+                        pass
+                    self._stream = None
+                    self._stream_initialized = False
+            except:
+                # Stream object exists but is invalid, clear it
+                self._stream = None
+                self._stream_initialized = False
+        
+        # Need to create a new stream - wait 2s for device initialization
+        if not self._stream_initialized:
+            sleep(2.0)
+        
+        attempt_rate = self.RESPEAKER_RATE  # 16000 Hz
+        max_retries = 3
+        retry_delay = 0.5
+        
+        last_error = None
+        for retry_attempt in range(max_retries):
+            try:
+                # Create stream (matching official ReSpeaker example)
+                # Suppress stderr during stream creation to hide ALSA warnings
+                with suppress_stderr():
+                    self._stream = self.pyaudio_instance.open(
+                        rate=attempt_rate,
+                        format=self.pyaudio_instance.get_format_from_width(self.RESPEAKER_WIDTH),
+                        channels=self.RESPEAKER_CHANNELS,
+                        input=True,
+                        input_device_index=self.RESPEAKER_INDEX,
+                        frames_per_buffer=self.CHUNK
+                    )
+                self._stream_initialized = True
+                return True
+                
+            except Exception as e:
+                last_error = e
+                # Ensure stream is closed even on error
+                try:
+                    if self._stream is not None:
+                        with suppress_stderr():
+                            self._stream.stop_stream()
+                            self._stream.close()
+                        self._stream = None
+                except:
+                    pass
+                
+                # Wait before retry
+                if retry_attempt < max_retries - 1:
+                    sleep(retry_delay)
+        
+        # If all retries failed, raise the last error
+        self._stream_initialized = False
+        raise last_error if last_error else Exception(f"Could not open audio stream at {attempt_rate} Hz after {max_retries} attempts")
+    
+    def _record_audio_pyaudio(self, duration=None):
+        """
+        Record audio using PyAudio with ReSpeaker device.
+        Extracts channel 0 from 2-channel input.
+        Reuses persistent stream to avoid initialization delays between recordings.
+        
+        Args:
+            duration (float, optional): Recording duration in seconds. 
+                                      If None, uses phrase_time_limit.
+        
+        Returns:
+            bytes: Raw audio data (mono, 16-bit PCM)
+        """
+        if duration is None:
+            duration = self.phrase_time_limit
+        
+        # Use lock to prevent race conditions
+        with self._pyaudio_lock:
+            # Ensure stream is open (reuses existing stream if available)
+            self._ensure_stream_open()
+            
+            attempt_rate = self.RESPEAKER_RATE  # 16000 Hz
+            
+            try:
+                frames = []
+                num_chunks = int(attempt_rate / self.CHUNK * duration)
+                
+                for i in range(num_chunks):
+                    data = self._stream.read(self.CHUNK, exception_on_overflow=False)
+                    # Convert bytes to numpy array
+                    a = np.frombuffer(data, dtype=np.int16)
+                    
+                    # Extract channel 0 data from 2 channels (as per official ReSpeaker example)
+                    # [0::2] means start at index 0, take every 2nd element (channel 0)
+                    if self.RESPEAKER_CHANNELS == 2:
+                        a = a[0::2]
+                    
+                    frames.append(a.tobytes())
+                
+                # Keep stream open for next recording (don't close it)
+                return b''.join(frames)
+                
+            except Exception as e:
+                # If recording fails, mark stream as invalid so it will be recreated next time
+                try:
+                    if self._stream is not None:
+                        with suppress_stderr():
+                            self._stream.stop_stream()
+                            self._stream.close()
+                except:
+                    pass
+                self._stream = None
+                self._stream_initialized = False
+                raise
+    
+    def _wav_bytes_to_audiodata(self, wav_bytes, sample_rate=16000, sample_width=2, channels=1):
+        """
+        Convert WAV bytes to speech_recognition AudioData object.
+        
+        Args:
+            wav_bytes (bytes): Raw PCM audio data
+            sample_rate (int): Sample rate in Hz
+            sample_width (int): Sample width in bytes
+            channels (int): Number of channels
+        
+        Returns:
+            sr.AudioData: AudioData object for speech_recognition
+        """
+        return sr.AudioData(wav_bytes, sample_rate, sample_width)
     
     def calibrate(self):
         """
         Calibrate the microphone for ambient noise.
         This should be called once before first use for better accuracy.
+        Note: Calibration with PyAudio direct recording is simplified.
+        Calibration is non-critical - if it fails, we use default values.
         """
         if not self._ambient_noise_adjusted:
             print("Calibrating microphone...")
-            with suppress_stderr():
-                with self.mic as source:
-                    self.recognizer.adjust_for_ambient_noise(
-                        source, 
-                        duration=self.ambient_noise_duration
-                    )
-            self._ambient_noise_adjusted = True
-            print("Ready! Listening...")
+            try:
+                # Record a short sample for calibration
+                # Device initialization delay is handled in _ensure_stream_open()
+                audio_data = self._record_audio_pyaudio(duration=self.ambient_noise_duration)
+                audio = self._wav_bytes_to_audiodata(audio_data)
+                
+                # Simple threshold estimation (we'll use a default reasonable value)
+                if self.energy_threshold is None:
+                    self.recognizer.energy_threshold = 300  # Default reasonable threshold
+                
+                self._ambient_noise_adjusted = True
+                print("Calibration complete. Ready! Listening...")
+            except Exception as e:
+                print(f"Warning: Could not calibrate microphone: {e}")
+                print("Using default settings - calibration is optional and non-critical.")
+                # Set default threshold anyway
+                if self.energy_threshold is None:
+                    self.recognizer.energy_threshold = 300
+                self._ambient_noise_adjusted = True
+                print("Ready! Listening...")
     
     def listen_and_transcribe(self, auto_calibrate=True, max_retries=3):
         """
-        Listen to microphone input and transcribe speech to text.
+        Listen to microphone input and transcribe speech to text using PyAudio.
         
         Args:
             auto_calibrate (bool): Automatically calibrate on first use (default: True)
@@ -200,69 +369,50 @@ class STT:
         Returns:
             str: Transcribed text in lowercase, or empty string on error
         """
+        # Calibrate on first use if needed
+        if auto_calibrate and not self._ambient_noise_adjusted:
+            self.calibrate()
+        
         for attempt in range(max_retries + 1):
             try:
-                # Suppress ALSA/JACK warnings during all microphone operations
-                with suppress_stderr():
-                    with self.mic as source:
-                        # Only adjust for ambient noise once at startup (saves 1-2 seconds per interaction)
-                        if auto_calibrate and not self._ambient_noise_adjusted:
-                            print("Calibrating microphone...")
-                            try:
-                                self.recognizer.adjust_for_ambient_noise(
-                                    source, 
-                                    duration=self.ambient_noise_duration
-                                )
-                                # Make threshold slightly more sensitive (reduce by 10%)
-                                # This helps catch quieter speech
-                                if self.recognizer.energy_threshold > 50:
-                                    self.recognizer.energy_threshold *= 0.9
-                                # Log the energy threshold for debugging
-                                print(f"Energy threshold set to: {self.recognizer.energy_threshold:.1f}")
-                                self._ambient_noise_adjusted = True
-                                print("Ready! Listening...")
-                            except Exception as e:
-                                print(f"Warning: Could not calibrate microphone: {e}")
-                                print("Continuing without calibration...")
-                                self._ambient_noise_adjusted = True  # Mark as attempted
-                        else:
-                            print("\nListening...")
-                        
-                        # Set manual energy threshold if provided
-                        if self.energy_threshold is not None:
-                            self.recognizer.energy_threshold = self.energy_threshold
-                        else:
-                            # Dynamically adjust threshold if it seems too high
-                            # Lower threshold by 20% if we're on a retry attempt (might be too sensitive)
-                            if attempt > 0 and self.recognizer.energy_threshold > 100:
-                                adjusted_threshold = self.recognizer.energy_threshold * 0.8
-                                self.recognizer.energy_threshold = adjusted_threshold
-                        
-                        # Listen for audio input
-                        try:
-                            audio = self.recognizer.listen(
-                                source, 
-                                timeout=self.timeout, 
-                                phrase_time_limit=self.phrase_time_limit
-                            )
-                        except sr.WaitTimeoutError:
-                            if attempt < max_retries:
-                                print("No speech detected, retrying...")
-                                sleep(0.5)  # Brief pause before retry
-                                continue
-                            print("No speech detected within timeout period.")
-                            return ""
-                        except OSError as e:
-                            print(f"Audio device error: {e}")
-                            if self._is_linux:
-                                print("On Raspberry Pi, you may need to:")
-                                print("  1. Check microphone permissions")
-                                print("  2. Verify audio device: arecord -l")
-                                print("  3. Test recording: arecord -d 3 test.wav")
-                            if attempt < max_retries:
-                                sleep(0.5)  # Brief delay before retry
-                                continue
-                            return ""
+                # Set manual energy threshold if provided
+                if self.energy_threshold is not None:
+                    self.recognizer.energy_threshold = self.energy_threshold
+                
+                print("\nListening...")
+                
+                # Record audio using PyAudio (thread-safe)
+                # Note: stderr suppression is handled inside _record_audio_pyaudio()
+                try:
+                    audio_data = self._record_audio_pyaudio(duration=self.phrase_time_limit)
+                except Exception as e:
+                    print(f"Audio recording error: {e}")
+                    if self._is_linux:
+                        print("On Raspberry Pi, you may need to:")
+                        print("  1. Check microphone permissions")
+                        print("  2. Verify audio device: arecord -l")
+                        print("  3. Test recording: arecord -d 3 test.wav")
+                        print(f"  4. Check ReSpeaker device index: {self.RESPEAKER_INDEX}")
+                    if attempt < max_retries:
+                        sleep(0.5)  # Brief delay before retry
+                        continue
+                    return ""
+                
+                # Convert to AudioData format for speech_recognition
+                try:
+                    audio = self._wav_bytes_to_audiodata(
+                        audio_data, 
+                        sample_rate=self.RESPEAKER_RATE,
+                        sample_width=self.RESPEAKER_WIDTH,
+                        channels=1
+                    )
+                except Exception as e:
+                    print(f"Audio conversion error: {e}")
+                    if attempt < max_retries:
+                        sleep(0.5)
+                        continue
+                    return ""
+                
             except Exception as e:
                 print(f"Error accessing microphone: {e}")
                 if self._is_linux:
@@ -270,6 +420,7 @@ class STT:
                     print("  - Ensure microphone is connected and recognized")
                     print("  - Check audio permissions in /etc/group (audio group)")
                     print("  - Try: sudo usermod -a -G audio $USER (then logout/login)")
+                    print(f"  - Verify ReSpeaker device index: {self.RESPEAKER_INDEX}")
                 if attempt < max_retries:
                     sleep(0.5)
                     continue
@@ -277,7 +428,6 @@ class STT:
 
             try:
                 # Use Google's recognizer with language hint for better accuracy
-                # Also enable show_all=False to get best result, and with_confidence for better handling
                 text = self.recognizer.recognize_google(audio, language="en-US")
                 print(f"You said: {text}")
                 return text.lower()
@@ -346,24 +496,62 @@ class STT:
         print("Testing microphone sensitivity...")
         print("Please speak normally for a few seconds...")
         
-        with suppress_stderr():
-            with self.mic as source:
-                # Get ambient noise level
-                self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
-                ambient_threshold = self.recognizer.energy_threshold
-                print(f"Ambient noise threshold: {ambient_threshold:.1f}")
+        try:
+            # Record ambient noise
+            # Note: stderr suppression is handled inside _record_audio_pyaudio()
+            audio_data = self._record_audio_pyaudio(duration=1.0)
+            audio = self._wav_bytes_to_audiodata(audio_data)
                 
-                # Test with speech
-                print("Now speak a sentence...")
-                try:
-                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=5)
-                    # Check audio energy
-                    import audioop
-                    rms = audioop.rms(audio.get_raw_data(), audio.sample_width)
-                    print(f"Speech RMS energy: {rms:.1f}")
-                    print(f"Suggested threshold: {max(ambient_threshold * 1.5, rms * 0.5):.1f}")
-                except sr.WaitTimeoutError:
-                    print("No speech detected during test.")
+            # Check audio energy
+            import audioop
+            rms = audioop.rms(audio.get_raw_data(), audio.sample_width)
+            print(f"Ambient noise RMS energy: {rms:.1f}")
+            
+            # Test with speech
+            print("Now speak a sentence...")
+            audio_data = self._record_audio_pyaudio(duration=5.0)
+            audio = self._wav_bytes_to_audiodata(audio_data)
+            rms = audioop.rms(audio.get_raw_data(), audio.sample_width)
+            print(f"Speech RMS energy: {rms:.1f}")
+            suggested_threshold = max(rms * 0.3, 200)  # Reasonable default
+            print(f"Suggested threshold: {suggested_threshold:.1f}")
+        except Exception as e:
+            print(f"Error during microphone test: {e}")
+    
+    def cleanup(self):
+        """
+        Clean up PyAudio resources.
+        Call this when done with the STT instance to free resources.
+        """
+        with self._pyaudio_lock:
+            try:
+                # Close persistent stream if it exists
+                if self._stream is not None:
+                    try:
+                        with suppress_stderr():
+                            if self._stream.is_active():
+                                self._stream.stop_stream()
+                            self._stream.close()
+                    except:
+                        pass
+                    self._stream = None
+                    self._stream_initialized = False
+            except Exception as e:
+                print(f"Error closing stream during cleanup: {e}")
+            
+            try:
+                if hasattr(self, 'pyaudio_instance') and self.pyaudio_instance:
+                    self.pyaudio_instance.terminate()
+                    self.pyaudio_instance = None
+            except Exception as e:
+                print(f"Error during PyAudio cleanup: {e}")
+    
+    def __del__(self):
+        """Cleanup on object destruction."""
+        try:
+            self.cleanup()
+        except:
+            pass  # Ignore errors during cleanup
 
 
 # Backward compatibility: Create a default instance and expose the function
