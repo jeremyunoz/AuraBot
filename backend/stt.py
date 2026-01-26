@@ -213,13 +213,16 @@ class STT:
                 self._stream = None
                 self._stream_initialized = False
         
-        # Need to create a new stream - wait 2s for device initialization
-        if not self._stream_initialized:
-            sleep(2.0)
-        
+        # Need to create a new stream - try immediately, retry with increasing delays
         attempt_rate = self.RESPEAKER_RATE  # 16000 Hz
-        max_retries = 3
-        retry_delay = 0.5
+        
+        # More retries and longer delays for first initialization
+        if not self._stream_initialized:
+            max_retries = 6
+            retry_delays = [0.2, 0.5, 1.0, 1.5, 2.0]  # Increasing delays for first init
+        else:
+            max_retries = 3
+            retry_delays = [0.5, 0.5, 0.5]  # Shorter delays for re-initialization
         
         last_error = None
         for retry_attempt in range(max_retries):
@@ -250,8 +253,9 @@ class STT:
                 except:
                     pass
                 
-                # Wait before retry
+                # Wait before retry with increasing delays
                 if retry_attempt < max_retries - 1:
+                    retry_delay = retry_delays[retry_attempt] if retry_attempt < len(retry_delays) else retry_delays[-1]
                     sleep(retry_delay)
         
         # If all retries failed, raise the last error
@@ -350,8 +354,16 @@ class STT:
                 self._ambient_noise_adjusted = True
                 print("Calibration complete. Ready! Listening...")
             except Exception as e:
-                print(f"Warning: Could not calibrate microphone: {e}")
-                print("Using default settings - calibration is optional and non-critical.")
+                # Check if it's a stream initialization error (device not ready yet)
+                error_msg = str(e)
+                if "Invalid sample rate" in error_msg or "Could not open audio stream" in error_msg:
+                    # Device not ready yet - this is expected on first use
+                    # Stream will be initialized on first actual recording
+                    print("Device initializing... using default settings.")
+                else:
+                    print(f"Warning: Could not calibrate microphone: {e}")
+                    print("Using default settings - calibration is optional and non-critical.")
+                
                 # Set default threshold anyway
                 if self.energy_threshold is None:
                     self.recognizer.energy_threshold = 300
