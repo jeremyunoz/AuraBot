@@ -7,6 +7,10 @@ import threading
 import time
 from typing import Optional, Callable
 from timer_manager import TimerManager
+try:
+    from .logger import AuraBotLogger
+except ImportError:
+    from logger import AuraBotLogger
 
 
 class WellnessTimerTrigger:
@@ -30,7 +34,8 @@ class WellnessTimerTrigger:
                  break_duration_seconds: Optional[int] = None,
                  break_timer_name: Optional[str] = None,
                  check_interval_seconds: int = DEFAULT_CHECK_INTERVAL_SECONDS,
-                 on_wellness_timer_created: Optional[Callable] = None):
+                 on_wellness_timer_created: Optional[Callable] = None,
+                 logger: Optional[AuraBotLogger] = None):
         """
         Initialize the WellnessTimerTrigger.
         
@@ -42,10 +47,12 @@ class WellnessTimerTrigger:
             break_timer_name: Name for wellness break timers (default: "Wellness Break")
             check_interval_seconds: How often to check session time in background (default: 10 seconds)
             on_wellness_timer_created: Optional callback called when wellness timer is created
+            logger: Optional AuraBotLogger instance for logging
         """
         self.timer_manager = timer_manager
         self.tts_engine = tts_engine
         self.on_wellness_timer_created = on_wellness_timer_created
+        self.logger = logger
         
         self.sitting_threshold_seconds = (
             sitting_threshold_seconds or self.DEFAULT_SITTING_THRESHOLD_SECONDS
@@ -125,14 +132,18 @@ class WellnessTimerTrigger:
                 # This prevents session time from accumulating during the break
                 if self.timer_manager.session_timer.is_active():
                     self.timer_manager.session_timer.pause()
-                    print(f"Session timer paused for wellness break")
+                    if self.logger:
+                        self.logger.log_wellness("Session timer paused for wellness break", "INFO")
                 
                 # Notify callback (e.g., to clear debounce counters)
                 if self.on_wellness_timer_created:
                     try:
                         self.on_wellness_timer_created()
                     except Exception as e:
-                        print(f"Error in wellness timer created callback: {e}")
+                        if self.logger:
+                            self.logger.log_error(f"Error in wellness timer created callback: {e}")
+                        else:
+                            print(f"Error in wellness timer created callback: {e}")
                 
                 # Record when we triggered this timer (based on session time)
                 # This ensures we wait for another full threshold period before next trigger
@@ -155,14 +166,30 @@ class WellnessTimerTrigger:
                             f"I've set a {self.break_duration_seconds // 60}-minute break timer."
                         )
                         self.tts_engine.speak(message)
+                        if self.logger:
+                            self.logger.log_wellness(
+                                f"Wellness timer created: {message}",
+                                "INFO",
+                                metadata={
+                                    "timer_id": timer_id,
+                                    "session_time_seconds": session_time_seconds,
+                                    "break_duration_seconds": self.break_duration_seconds
+                                }
+                            )
                     except Exception as e:
-                        print(f"Error announcing wellness timer: {e}")
+                        if self.logger:
+                            self.logger.log_error(f"Error announcing wellness timer: {e}")
+                        else:
+                            print(f"Error announcing wellness timer: {e}")
                 
                 return timer_id
                 
             except ValueError as e:
                 # Max timers reached or other error
-                print(f"Error creating wellness timer: {e}")
+                if self.logger:
+                    self.logger.log_error(f"Error creating wellness timer: {e}")
+                else:
+                    print(f"Error creating wellness timer: {e}")
                 return None
     
     def reset_trigger_state(self):
@@ -222,7 +249,10 @@ class WellnessTimerTrigger:
                         if session_time > 0:
                             self.check_and_trigger_wellness_timer(session_time)
                 except Exception as e:
-                    print(f"Error in wellness timer monitoring: {e}")
+                    if self.logger:
+                        self.logger.log_error(f"Error in wellness timer monitoring: {e}")
+                    else:
+                        print(f"Error in wellness timer monitoring: {e}")
                 
                 # Wait for check interval or stop event
                 self._stop_monitoring.wait(timeout=self.check_interval_seconds)

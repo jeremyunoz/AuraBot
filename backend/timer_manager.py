@@ -9,8 +9,10 @@ from typing import Dict, List, Optional
 from uuid import uuid4
 try:
     from .session_timer import SessionTimer
+    from .logger import AuraBotLogger
 except ImportError:
     from session_timer import SessionTimer
+    from logger import AuraBotLogger
 
 
 class TimerManager:
@@ -36,7 +38,7 @@ class TimerManager:
         
         Args:
             tts_engine: TTS engine instance for timer notifications
-            logger: ConversationLogger instance for logging timer events
+            logger: AuraBotLogger or ConversationLogger instance for logging timer events
             max_timers: Maximum concurrent timers (default: MAX_CONCURRENT_TIMERS)
             session_data_file: Optional path for session timer data file
         """
@@ -246,22 +248,43 @@ class TimerManager:
         try:
             self.tts_engine.speak(notification)
         except Exception as e:
-            print(f"Error speaking timer notification: {e}")
+            if hasattr(self.logger, 'log_error'):
+                self.logger.log_error(f"Error speaking timer notification: {e}")
+            else:
+                print(f"Error speaking timer notification: {e}")
         
         # Log timer expiration
         try:
-            self.logger.log_event(
-                f"Timer expired: {name}",
-                notification
-            )
+            # Use new logger interface if available, otherwise fall back to old interface
+            if hasattr(self.logger, 'log_timer'):
+                self.logger.log_timer(
+                    f"Timer expired: {name} - {notification}",
+                    "INFO",
+                    metadata={"timer_id": timer_id, "name": name, "timer_type": timer_type}
+                )
+            elif hasattr(self.logger, 'log_event'):
+                # Backward compatibility with ConversationLogger
+                self.logger.log_event(
+                    f"Timer expired: {name}",
+                    notification
+                )
         except Exception as e:
-            print(f"Error logging timer expiration: {e}")
+            if hasattr(self.logger, 'log_error'):
+                self.logger.log_error(f"Error logging timer expiration: {e}")
+            else:
+                print(f"Error logging timer expiration: {e}")
         
         # If wellness timer expired, session timer can resume
         # But don't auto-resume - let presence detection handle it with proper debounce
         # This ensures user must actually be present (not just one sensor reading)
         if timer_type == self.TIMER_TYPE_WELLNESS:
-            print("Wellness break completed - session timer can resume when user presence is confirmed")
+            if hasattr(self.logger, 'log_wellness'):
+                self.logger.log_wellness(
+                    "Wellness break completed - session timer can resume when user presence is confirmed",
+                    "INFO"
+                )
+            else:
+                print("Wellness break completed - session timer can resume when user presence is confirmed")
     
     def format_time_remaining(self, seconds: float) -> str:
         """

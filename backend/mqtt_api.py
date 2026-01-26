@@ -8,6 +8,7 @@ import time
 from typing import Dict, Optional
 from wellness_timer_trigger import WellnessTimerTrigger
 from timer_manager import TimerManager
+from logger import AuraBotLogger, LogCategory
 
 
 class MQTTAPI:
@@ -21,7 +22,8 @@ class MQTTAPI:
     def __init__(self, 
                  aurabot,
                  wellness_threshold_seconds: Optional[int] = None,
-                 wellness_break_duration_seconds: Optional[int] = None):
+                 wellness_break_duration_seconds: Optional[int] = None,
+                 logger: Optional[AuraBotLogger] = None):
         """
         Initialize the MQTT API.
         
@@ -31,10 +33,12 @@ class MQTTAPI:
                                        (None uses default from WellnessTimerTrigger)
             wellness_break_duration_seconds: Duration of wellness break timer in seconds
                                            (None uses default from WellnessTimerTrigger)
+            logger: Optional AuraBotLogger instance (defaults to aurabot.logger if available)
         """
         self.aurabot = aurabot
         self.timer_manager = aurabot.timer_manager
         self.tts_engine = aurabot.tts_engine
+        self.logger = logger or getattr(aurabot, 'logger', None)
         
         # Initialize wellness timer trigger with optional configuration
         # Pass callback to clear debounce counters when wellness timer is created
@@ -43,7 +47,8 @@ class MQTTAPI:
             tts_engine=self.tts_engine,
             sitting_threshold_seconds=wellness_threshold_seconds,
             break_duration_seconds=wellness_break_duration_seconds,
-            on_wellness_timer_created=self._clear_debounce_counters
+            on_wellness_timer_created=self._clear_debounce_counters,
+            logger=self.logger
         )
         
         # Start background monitoring of session time
@@ -84,7 +89,8 @@ class MQTTAPI:
         """
         self._consecutive_present_count = 0
         self._consecutive_absent_count = 0
-        print("Debounce counters cleared for wellness break")
+        if self.logger:
+            self.logger.log_wellness("Debounce counters cleared for wellness break", "INFO")
     
     def _handle_stop_session(self) -> Optional[Dict]:
         """
@@ -190,10 +196,17 @@ class MQTTAPI:
                 was_idle = self.aurabot.start_sitting_timer()
                 if was_idle:
                     response["actions"].append("session_started")
-                    print(
-                        f"Session started: user detected (stable for {self._consecutive_present_count} readings) "
-                        f"(distance: {distance:.1f}cm, motion: {motion}, camera: {camera_confirmed})"
-                    )
+                    if self.logger:
+                        self.logger.log_session(
+                            f"Session started: user detected (stable for {self._consecutive_present_count} readings)",
+                            "INFO",
+                            metadata={
+                                "distance_cm": distance,
+                                "motion": motion,
+                                "camera_confirmed": camera_confirmed,
+                                "consecutive_present": self._consecutive_present_count
+                            }
+                        )
                     
                     # Reset wellness timer trigger state for new session
                     if session_state_before == "idle":
@@ -208,10 +221,12 @@ class MQTTAPI:
                 # User is present but wellness timer is active - don't resume session
                 # Counter is not incremented during break, so we'll need fresh readings after break ends
                 response["actions"].append("session_held_for_wellness_break")
-                print(
-                    f"Session resume blocked: wellness break active "
-                    f"(counter reset, will need {self._presence_stable_count} fresh consecutive readings after break)"
-                )
+                if self.logger:
+                    self.logger.log_wellness(
+                        "Session resume blocked: wellness break active",
+                        "INFO",
+                        metadata={"presence_stable_count": self._presence_stable_count}
+                    )
         else:
             # Increment absent counter, reset present counter
             self._consecutive_absent_count += 1
@@ -226,10 +241,17 @@ class MQTTAPI:
                 was_active = self.aurabot.pause_sitting_timer()
                 if was_active:
                     response["actions"].append("session_paused")
-                    print(
-                        f"Session paused: user left (stable for {self._consecutive_absent_count} readings) "
-                        f"(distance: {distance:.1f}cm, motion: {motion}, camera: {camera_confirmed})"
-                    )
+                    if self.logger:
+                        self.logger.log_session(
+                            f"Session paused: user left (stable for {self._consecutive_absent_count} readings)",
+                            "INFO",
+                            metadata={
+                                "distance_cm": distance,
+                                "motion": motion,
+                                "camera_confirmed": camera_confirmed,
+                                "consecutive_absent": self._consecutive_absent_count
+                            }
+                        )
                     
                     # Pause wellness timer monitoring when user leaves
                     self.wellness_trigger.pause_monitoring()
@@ -265,13 +287,19 @@ class MQTTAPI:
                             # Auto-pause session due to sensor timeout
                             was_active = self.aurabot.pause_sitting_timer()
                             if was_active:
-                                print(f"Session auto-paused: no sensor data for {self._sensor_timeout_seconds:.0f} seconds")
+                                if self.logger:
+                                    self.logger.log_sensor(
+                                        f"Session auto-paused: no sensor data for {self._sensor_timeout_seconds:.0f} seconds",
+                                        "WARNING",
+                                        metadata={"timeout_seconds": self._sensor_timeout_seconds}
+                                    )
                                 self.wellness_trigger.pause_monitoring()
                                 # Reset last sensor time to prevent repeated auto-pause
                                 self._last_sensor_time = None
                 
                 except Exception as e:
-                    print(f"Error in sensor timeout monitoring: {e}")
+                    if self.logger:
+                        self.logger.log_error(f"Error in sensor timeout monitoring: {e}")
                 
                 # Check every 5 seconds
                 self._stop_timeout_check.wait(timeout=5.0)

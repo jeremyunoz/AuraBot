@@ -81,26 +81,26 @@ class MQTTIntegration:
             with self._connection_lock:
                 self._is_connected = True
             
-            print("MQTT connected to broker")
+            self.mqtt_api.logger.log_mqtt("MQTT connected to broker", "INFO")
             
             # Subscribe to topics
             for topic in self.topics:
                 client.subscribe(topic, qos=1)
-                print(f"Subscribed to {topic}")
+                self.mqtt_api.logger.log_mqtt(f"Subscribed to {topic}", "INFO")
         else:
-            print(f"MQTT connection failed with code {rc}")
+            self.mqtt_api.logger.log_mqtt(f"MQTT connection failed with code {rc}", "ERROR")
     
     def _on_disconnect(self, client: mqtt.Client, userdata, flags, rc, *args, **kwargs):
         """Handle MQTT disconnection event."""
         with self._connection_lock:
             self._is_connected = False
-        print("MQTT disconnected from broker")
+        self.mqtt_api.logger.log_mqtt("MQTT disconnected from broker", "INFO")
     
     def _on_message(self, client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
         """Handle incoming MQTT messages."""
         try:
             payload = msg.payload.decode("utf-8", errors="replace")
-            print(f"[MQTT] {msg.topic}: {payload}")
+            self.mqtt_api.logger.log_mqtt(f"Received message on {msg.topic}: {payload}", "INFO")
             
             # Parse JSON payload
             try:
@@ -109,18 +109,30 @@ class MQTTIntegration:
                 # Route by topic
                 if msg.topic == "aurabot/sensors":
                     response = self.mqtt_api.handle_sensor_data(data)
-                    print(f"[MQTT] Sensors processed: {response.get('status', 'unknown')}")
+                    self.mqtt_api.logger.log_mqtt(
+                        f"Sensors processed: {response.get('status', 'unknown')}",
+                        "INFO",
+                        metadata={"topic": msg.topic, "status": response.get('status')}
+                    )
                 elif msg.topic == "aurabot/control":
                     response = self.mqtt_api.handle_control_command(data)
-                    print(f"[MQTT] Control processed: {response.get('status', 'unknown')}")
+                    self.mqtt_api.logger.log_mqtt(
+                        f"Control processed: {response.get('status', 'unknown')}",
+                        "INFO",
+                        metadata={"topic": msg.topic, "status": response.get('status')}
+                    )
                 else:
-                    print(f"[MQTT] Unhandled topic: {msg.topic}")
+                    self.mqtt_api.logger.log_mqtt(f"Unhandled topic: {msg.topic}", "WARNING")
                     
             except json.JSONDecodeError:
-                print(f"[MQTT] Non-JSON payload on {msg.topic}: {payload}")
+                self.mqtt_api.logger.log_mqtt(
+                    f"Non-JSON payload on {msg.topic}: {payload}",
+                    "WARNING",
+                    metadata={"topic": msg.topic}
+                )
                 
         except Exception as e:
-            print(f"[MQTT] Error handling message: {e}")
+            self.mqtt_api.logger.log_mqtt(f"Error handling message: {e}", "ERROR")
     
     def start(self, client: Optional[mqtt.Client] = None, host: Optional[str] = None, port: Optional[int] = None):
         """
@@ -132,7 +144,7 @@ class MQTTIntegration:
             port: MQTT broker port (only used if client is None)
         """
         if self.client and self._is_connected:
-            print("MQTT integration already running")
+            self.mqtt_api.logger.log_mqtt("MQTT integration already running", "WARNING")
             return
         
         # Create client if not provided
@@ -158,9 +170,13 @@ class MQTTIntegration:
         try:
             self.client.connect(broker_host, broker_port, keepalive=60)
             self.client.loop_start()
-            print(f"MQTT integration starting (connecting to {broker_host}:{broker_port})...")
+            self.mqtt_api.logger.log_mqtt(
+                f"MQTT integration starting (connecting to {broker_host}:{broker_port})",
+                "INFO",
+                metadata={"host": broker_host, "port": broker_port}
+            )
         except Exception as e:
-            print(f"Failed to start MQTT integration: {e}")
+            self.mqtt_api.logger.log_mqtt(f"Failed to start MQTT integration: {e}", "ERROR")
             self.client = None
     
     def stop(self):
@@ -171,9 +187,9 @@ class MQTTIntegration:
                 self.client.disconnect()
                 with self._connection_lock:
                     self._is_connected = False
-                print("MQTT integration stopped")
+                self.mqtt_api.logger.log_mqtt("MQTT integration stopped", "INFO")
             except Exception as e:
-                print(f"Error stopping MQTT integration: {e}")
+                self.mqtt_api.logger.log_mqtt(f"Error stopping MQTT integration: {e}", "ERROR")
             finally:
                 self.client = None
     
@@ -196,14 +212,21 @@ class MQTTIntegration:
             True if published successfully, False otherwise
         """
         if not self.client or not self._is_connected:
-            print("MQTT not connected, cannot publish")
+            self.mqtt_api.logger.log_mqtt("MQTT not connected, cannot publish", "WARNING")
             return False
         
         try:
             payload_str = json.dumps(payload)
             result = self.client.publish(topic, payload_str, qos=qos, retain=retain)
-            return result.rc == mqtt.MQTT_ERR_SUCCESS
+            success = result.rc == mqtt.MQTT_ERR_SUCCESS
+            if success:
+                self.mqtt_api.logger.log_mqtt(
+                    f"Published to {topic}",
+                    "INFO",
+                    metadata={"topic": topic, "qos": qos}
+                )
+            return success
         except Exception as e:
-            print(f"Error publishing to {topic}: {e}")
+            self.mqtt_api.logger.log_mqtt(f"Error publishing to {topic}: {e}", "ERROR")
             return False
 
