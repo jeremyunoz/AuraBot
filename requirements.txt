@@ -3,12 +3,19 @@ SpeechRecognition==3.14.3
 # pyttsx3==2.99
 paho-mqtt==2.1.0
 python-dotenv==1.2.1
+
+# Pin numpy to match system version for picamera2 compatibility
+# System picamera2 was compiled against numpy 1.24.2
+numpy==1.24.2
+
 # PyAudio is required for speech recognition
 # On Raspberry Pi, install system dependencies first:
 #   sudo apt-get update
 #   sudo apt-get install portaudio19-dev python3-pyaudio flac alsa-utils espeak-ng
+
 PyAudio==0.2.14
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 ultralytics>=8.0.0
-opencv-python>=4.8.0
+# opencv-python-headless pinned to version compatible with numpy 1.24.2 (required for picamera2)
+opencv-python-headless==4.8.1.78
