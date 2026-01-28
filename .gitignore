@@ -71,3 +71,9 @@ docs/
 backend/.env
 backend/*.pem
 backend/*.key
+
+# ML Models (too large for git - download on Pi5)
+vision/*.pt
+vision/*_ncnn_model/
+vision/*.onnx
+vision/*.engine
