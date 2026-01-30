@@ -1,22 +1,34 @@
 # AuraBot
 
-A voice-activated wellness chatbot that uses speech-to-text and text-to-speech to provide interactive conversations and wellness reminders.
+A voice-activated wellness chatbot that uses speech-to-text and text-to-speech for interactive conversations, wellness reminders, and presence-aware session tracking. Combines ESP32 sensors, Raspberry Pi vision, and MQTT for a multi-device setup.
 
 ## Features
 
--  🎤 **Speech Recognition**: Listens to your voice input using Google's speech recognition API
--  🔊 **Text-to-Speech**: Responds with natural voice output (optimized for macOS using native `say` command)
--  💬 **Interactive Conversations**: Engages in natural dialogue with context-aware responses
--  📝 **Conversation Logging**: Automatically logs all interactions with timestamps
--  🏃 **Wellness Reminders**: Provides gentle reminders to stay active and take breaks
--  ⏰ **Timer Management**: Set, query, and cancel timers via voice commands with natural language support
--  ⏱️ **Session Timer**: Tracks sitting time with pause/resume functionality
+### Voice & Conversation
+-  🎤 **Speech Recognition**: Listens to voice input using Google's speech recognition API
+-  🔊 **Text-to-Speech**: Natural voice output (macOS `say`, espeak-ng on Raspberry Pi, pyttsx3 fallback)
+-  💬 **Interactive Conversations**: Natural dialogue with context-aware responses
+-  📝 **Conversation Logging**: Logs all interactions with timestamps
+
+### Wellness & Timers
+-  ⏰ **Timer Management**: Set, query, and cancel timers via voice (natural language support)
+-  ⏱️ **Session Timer**: Tracks sitting time with pause/resume (presence-aware)
+-  🏃 **Wellness Timer Trigger**: Automatically suggests breaks after extended sitting
+-  👁️ **Presence Detection**: PIR sensor (ESP32) + optional camera (Pi) drive session start/pause
+
+### Hardware & Integration
+-  📡 **ESP32 + MQTT**: PIR motion sensor publishes to `aurabot/sensors`
+-  📷 **Vision Module**: YOLO person detection on Raspberry Pi 5 (camera_confirmed)
+-  📊 **Web Dashboard**: Status, session controls, timers, wellness config (port 8000)
+-  🧪 **Presence Simulator**: `presence_sim.sh` for testing without hardware
 
 ## Requirements
 
 -  Python 3.7+
 -  Microphone access
 -  Internet connection (for Google Speech Recognition API)
+-  MQTT broker (e.g. Mosquitto) for sensor integration
+-  Optional: ESP32 with PIR sensor; Raspberry Pi 5 for vision
 
 ## Installation
 
@@ -43,11 +55,46 @@ A voice-activated wellness chatbot that uses speech-to-text and text-to-speech t
 
 ## Usage
 
-Run the main simulation loop:
+### Run AuraBot (main loop)
 
 ```bash
-python backend/sim_loop.py
+cd backend
+python sim_loop.py
 ```
+
+- Starts the voice loop, MQTT integration (if enabled), and web dashboard at http://localhost:8000
+- Use `backend/.env` for `MQTT_HOST`, `MQTT_PORT`, `MQTT_USERNAME`, `MQTT_PASSWORD`
+
+### Presence simulation (no hardware)
+
+```bash
+# Simulate user present (starts session)
+./presence_sim.sh
+
+# Simulate user absent (pauses session)
+DISTANCE_CM=60 MOTION=0 CAMERA_CONFIRMED=0 ./presence_sim.sh
+```
+
+If your broker requires auth: `MQTT_USER=user MQTT_PASS=pass ./presence_sim.sh`
+
+### Vision module (Raspberry Pi 5)
+
+```bash
+cd vision
+python setup_model.py   # First time only
+python object_detection.py --capture picamera2
+```
+
+### ESP32 firmware
+
+Build and flash with ESP-IDF:
+
+```bash
+cd esp32
+idf.py build flash monitor
+```
+
+Configure WiFi and MQTT via `idf.py menuconfig` (or sdkconfig.defaults).
 
 ### How it works
 
@@ -91,137 +138,119 @@ AuraBot: Goodbye! Remember to stretch often.
 ```
 AuraBot/
 ├── backend/
-│   ├── sim_loop.py          # Main simulation loop and AuraBot class
-│   ├── stt.py               # Speech-to-Text module
-│   ├── tts.py               # Text-to-Speech module
-│   ├── logger.py            # Conversation logging
-│   ├── response_handler.py  # Response generation and command routing
-│   ├── timer_manager.py     # Timer management and notifications
-│   ├── timer_parser.py      # Natural language timer command parsing
-│   └── session_timer.py     # Session time tracking
-├── tests/                   # Test suites
-│   ├── test_timer_phase1.py
-│   ├── test_timer_parser.py
-│   ├── test_timer_integration.py
-│   ├── test_timer_phase4.py
-│   └── test_session_timer.py
-├── logs/                    # Conversation and session logs (auto-generated)
-├── out/                     # Output files
-├── requirements.txt         # Python dependencies
-├── TIMER_FEATURE_DESIGN.md  # Comprehensive timer feature documentation
-├── SESSION_TIMER_DOCUMENTATION.md  # Session timer documentation
-└── README.md               # This file
+│   ├── sim_loop.py              # Main loop, AuraBot class, MQTT + dashboard startup
+│   ├── stt.py                   # Speech-to-Text
+│   ├── tts.py                   # Text-to-Speech
+│   ├── logger.py                # Conversation and MQTT logging
+│   ├── response_handler.py      # Response generation and command routing
+│   ├── timer_manager.py         # Timer management and notifications
+│   ├── timer_parser.py          # Natural language timer parsing
+│   ├── session_timer.py         # Session time tracking
+│   ├── wellness_timer_trigger.py # Auto wellness breaks from sitting time
+│   ├── mqtt_api.py              # MQTT message handling, presence, control
+│   ├── mqtt_integration.py      # MQTT client lifecycle and routing
+│   └── dashboard_api.py         # FastAPI dashboard (status, sessions, control)
+├── dashboard/
+│   ├── index.html               # Web dashboard UI
+│   ├── app.js                   # Dashboard logic
+│   └── styles.css               # Dashboard styles
+├── esp32/
+│   └── main/
+│       ├── main.c               # App entry, WiFi, MQTT task
+│       ├── mqtt.c/h             # MQTT publish
+│       ├── pir.c/h              # PIR motion sensor (GPIO)
+│       └── wifi_connect.c/h     # WiFi STA
+├── vision/
+│   ├── object_detection.py      # YOLO person detection (Pi 5)
+│   ├── setup_model.py           # Model download and NCNN conversion
+│   └── README.md
+├── presence_sim.sh              # MQTT presence test script
+├── RASPBERRY_PI_SETUP.md        # Pi 5 audio and environment setup
+├── requirements.txt
+└── README.md
 ```
 
 ## Modules
 
-### `sim_loop.py` - Main Loop & AuraBot Class
+### Backend Core
 
--  Manages the conversation flow and AuraBot lifecycle
--  Handles user input and bot responses
--  Integrates all modules (STT, TTS, ResponseHandler, TimerManager)
--  Manages activity tracking and wellness reminders
+| Module | Description |
+|--------|-------------|
+| `sim_loop.py` | Main loop, AuraBot class; starts MQTT, dashboard, and voice flow |
+| `stt.py` | Speech-to-Text (Google API, ambient noise calibration) |
+| `tts.py` | Text-to-Speech (macOS `say`, espeak-ng on Pi, pyttsx3 fallback) |
+| `response_handler.py` | Keyword responses, timer routing, wellness interactions |
+| `timer_manager.py` | Multiple concurrent timers, TTS notifications, named timers |
+| `timer_parser.py` | Natural language timer parsing (durations, names) |
+| `session_timer.py` | Sitting time with pause/resume, JSON session history |
+| `wellness_timer_trigger.py` | Auto wellness breaks when sitting exceeds threshold |
+| `logger.py` | Conversation and MQTT logging with category routing |
 
-### `stt.py` - Speech-to-Text
+### MQTT & Dashboard
 
--  Uses `speech_recognition` library with Google's online recognizer
--  Automatic microphone calibration for ambient noise
--  Configurable timeout and phrase limits
--  Returns transcribed text in lowercase
+| Module | Description |
+|--------|-------------|
+| `mqtt_api.py` | Handles `aurabot/sensors` and `aurabot/control`; presence debounce; wellness trigger |
+| `mqtt_integration.py` | MQTT client factory, lifecycle, topic subscription |
+| `dashboard_api.py` | FastAPI: `/api/status`, `/api/sessions`, `/api/control`, `/api/config` |
 
-### `tts.py` - Text-to-Speech
+### ESP32
 
--  Optimized for macOS using native `say` command
--  Falls back to `pyttsx3` on other platforms or if system command fails
--  Configurable speech rate and volume
--  Thread-safe with lock to prevent concurrent speech
--  Handles audio device handoff gracefully
-
-### `response_handler.py` - Response Generation
-
--  Keyword-based response system
--  Routes timer commands to TimerManager
--  Handles conversational responses and wellness interactions
--  Supports custom response dictionaries
-
-### `timer_manager.py` - Timer Management
-
--  Manages multiple concurrent timers (up to 10)
--  Thread-safe timer operations
--  Automatic TTS notifications on timer expiration
--  Supports named timers and timer queries
--  See `TIMER_FEATURE_DESIGN.md` for complete documentation
-
-### `timer_parser.py` - Timer Command Parsing
-
--  Parses natural language timer commands
--  Extracts durations (minutes, hours, seconds)
--  Extracts timer names/labels from user input
--  Supports various time formats and command patterns
-
-### `session_timer.py` - Session Time Tracking
-
--  Tracks sitting/activity time with pause/resume
--  Saves session history to JSON
--  Thread-safe state management
--  See `SESSION_TIMER_DOCUMENTATION.md` for complete documentation
-
-### `logger.py` - Conversation Logging
-
--  Logs all interactions with timestamps
--  Structured logging format
--  Automatic log file management
+| Component | Description |
+|-----------|-------------|
+| `main.c` | WiFi STA, publisher task, PIR interrupt |
+| `pir.c/h` | PIR motion sensor on GPIO with event groups |
+| `mqtt.c/h` | Publish JSON to `aurabot/sensors` (motion, count, ts_us, placeholders for camera/distance) |
 
 ## Configuration
 
-### Microphone Settings
+### Environment (`backend/.env`)
 
-You can customize microphone settings in `stt.py`:
+```env
+MQTT_HOST=127.0.0.1
+MQTT_PORT=1883
+MQTT_USERNAME=       # Optional
+MQTT_PASSWORD=       # Optional
+```
 
--  `timeout`: Maximum seconds to wait for speech (default: 5)
--  `phrase_time_limit`: Maximum seconds for a phrase (default: 5)
--  `ambient_noise_duration`: Calibration duration (default: 0.5)
+### Microphone (stt.py)
 
-### TTS Settings
+- `timeout`: Max seconds to wait for speech (default: 5)
+- `phrase_time_limit`: Max phrase length (default: 5)
+- `ambient_noise_duration`: Calibration duration (default: 0.5)
 
-TTS settings can be adjusted in `tts.py`:
+### TTS (tts.py)
 
--  Speech rate: Currently set to 200 words per minute (macOS) or 180 (pyttsx3)
--  Volume: Set to 0.9 (90%) for pyttsx3
+- macOS: native `say`; Raspberry Pi: espeak-ng; fallback: pyttsx3
+- Speech rate and volume configurable in module
 
 ## Timer Feature
 
-AuraBot includes a comprehensive timer feature that allows you to:
-
--  **Set timers**: "Set a timer for 5 minutes" or "Set a coffee timer for 10 minutes"
--  **Query timers**: "How much time is left?" or "What timers are running?"
--  **Cancel timers**: "Cancel timer" or "Cancel the coffee timer"
--  **Multiple timers**: Track up to 10 concurrent timers with names
-
-Timers automatically notify you via TTS when they expire. For complete documentation, see [`TIMER_FEATURE_DESIGN.md`](TIMER_FEATURE_DESIGN.md).
+- **Set**: "Set a timer for 5 minutes" or "Set a coffee timer for 10 minutes"
+- **Query**: "How much time is left?" or "What timers are running?"
+- **Cancel**: "Cancel timer" or "Cancel the coffee timer"
+- **Multiple timers**: Up to 10 concurrent named timers; TTS on expiry
 
 ## Logs
 
-All conversations are automatically logged to `logs/stt_tts_test.log` with timestamps:
-
-```
-[2024-01-15 10:30:45] USER: hello
-[2024-01-15 10:30:45] BOT:  Hi there! How are you feeling today?
-[2024-01-15 10:35:20] USER: set timer for 5 minutes
-[2024-01-15 10:35:20] BOT:  Sure! Timer set for 5 minutes. I'll remind you when it's done.
-```
-
-Session timer data is saved to `logs/sitting_sessions.json` (if session timer is used).
+- `logs/stt_tts_test.log` – conversation log
+- `logs/sitting_sessions.json` – session history
+- MQTT events logged via `AuraBotLogger` when configured
 
 ## Dependencies
 
--  `speechrecognition>=3.10.0` - Speech recognition library
--  `pyttsx3>=2.90` - Text-to-speech engine
+- `SpeechRecognition` – speech recognition
+- `PyAudio` – microphone capture
+- `paho-mqtt` – MQTT client
+- `python-dotenv` – env config
+- `fastapi`, `uvicorn` – dashboard API
+- `ultralytics`, `opencv-python-headless` – vision (Raspberry Pi)
 
 ## Platform Support
 
--  **macOS**: Optimized with native `say` command for reliable TTS
--  **Linux/Windows**: Uses `pyttsx3` for cross-platform compatibility
+- **macOS**: Native `say` for TTS
+- **Raspberry Pi 5**: espeak-ng for TTS; `vision/` for YOLO person detection
+- **Linux/Windows**: pyttsx3 fallback for TTS
 
 ## Troubleshooting
 
@@ -245,29 +274,17 @@ Session timer data is saved to `logs/sitting_sessions.json` (if session timer is
 
 ### Timer not working
 
--  Check that timer commands are being recognized (see timer documentation)
--  Verify TimerManager is initialized correctly
--  Check logs for timer-related errors
+- Check that timer commands are being recognized
+- Verify TimerManager is initialized correctly
+- Check logs for timer-related errors
+
+### MQTT not connecting
+
+- Ensure Mosquitto (or another broker) is running
+- Set `MQTT_HOST` and `MQTT_PORT` in `backend/.env`
+- For auth: set `MQTT_USERNAME` and `MQTT_PASSWORD` (same as broker config)
 
 ## Documentation
 
--  **Timer Feature**: See [`TIMER_FEATURE_DESIGN.md`](TIMER_FEATURE_DESIGN.md) for complete timer documentation
--  **Session Timer**: See [`SESSION_TIMER_DOCUMENTATION.md`](SESSION_TIMER_DOCUMENTATION.md) for session timer documentation
--  **Environment**: See [`ENVIRONMENT_OVERVIEW.md`](ENVIRONMENT_OVERVIEW.md) for environment setup details
-
-## Testing
-
-Run the test suites to verify functionality:
-
-```bash
-# Test timer parser
-python3 tests/test_timer_parser.py
-
-# Test timer functionality
-python3 tests/test_timer_phase1.py
-python3 tests/test_timer_integration.py
-python3 tests/test_timer_phase4.py
-
-# Test session timer
-python3 tests/test_session_timer.py
-```
+- **[RASPBERRY_PI_SETUP.md](RASPBERRY_PI_SETUP.md)** – Pi 5 audio capture, dependencies, MQTT auth
+- **[vision/README.md](vision/README.md)** – YOLO setup and object detection on Pi 5
