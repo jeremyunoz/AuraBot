@@ -1,6 +1,9 @@
 # ===== ESP-IDF build output =====
 build/
 
+# ===== ESP-IDF managed components (downloaded by idf.py) =====
+managed_components/
+
 # ===== SDKCONFIG =====
 sdkconfig.old
 sdkconfig.bak
