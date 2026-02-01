@@ -42,10 +42,10 @@ A voice-activated wellness chatbot that uses speech-to-text and text-to-speech f
 2. Create a virtual environment (recommended):
 
    ```bash
-   python3 -m venv aurapet-env
-   source aurapet-env/bin/activate  # On macOS/Linux
+   python3 -m venv aurabot-env
+   source aurabot-env/bin/activate  # On macOS/Linux
    # or
-   aurapet-env\Scripts\activate  # On Windows
+   aurabot-env\Scripts\activate  # On Windows
    ```
 
 3. Install dependencies:
@@ -95,6 +95,15 @@ idf.py build flash monitor
 ```
 
 Configure WiFi and MQTT via `idf.py menuconfig` (or sdkconfig.defaults).
+
+### ESP32 speaker (optional)
+
+For boards with an ES8311 codec (e.g. **ESP32-P4-WIFI6** from Waveshare):
+
+1. In `idf.py menuconfig` → **AuraBot Configuration** → **Speaker (ES8311 Codec)**:
+   - Enable **Enable speaker output**
+   - Defaults match ESP32-P4-WIFI6 (I2C: 7/8, I2S: 9–13, PA: 53). Adjust for other boards.
+2. Build and flash. On PIR motion, a short beep plays; you can also call `speaker_beep()`, `speaker_write()`, etc. from your code.
 
 ### How it works
 
@@ -155,10 +164,12 @@ AuraBot/
 │   ├── app.js                   # Dashboard logic
 │   └── styles.css               # Dashboard styles
 ├── esp32/
+│   ├── sdkconfig.defaults       # ESP-IDF default config
 │   └── main/
 │       ├── main.c               # App entry, WiFi, MQTT task
 │       ├── mqtt.c/h             # MQTT publish
 │       ├── pir.c/h              # PIR motion sensor (GPIO)
+│       ├── speaker.c/h          # Speaker (ES8311 via esp_codec_dev)
 │       └── wifi_connect.c/h     # WiFi STA
 ├── vision/
 │   ├── object_detection.py      # YOLO person detection (Pi 5)
@@ -198,9 +209,11 @@ AuraBot/
 
 | Component | Description |
 |-----------|-------------|
-| `main.c` | WiFi STA, publisher task, PIR interrupt |
+| `main.c` | WiFi STA, publisher task, PIR interrupt, optional speaker init |
 | `pir.c/h` | PIR motion sensor on GPIO with event groups |
 | `mqtt.c/h` | Publish JSON to `aurabot/sensors` (motion, count, ts_us, placeholders for camera/distance) |
+| `speaker.c/h` | ES8311 codec output (beep, TTS); optional via Kconfig |
+| `wifi_connect.c/h` | WiFi station connection |
 
 ## Configuration
 
