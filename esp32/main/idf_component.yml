@@ -8,3 +8,4 @@ dependencies:
       rules:
          - if: target in [esp32p4, esp32h2]
    espressif/mqtt: "*"
+   espressif/esp_codec_dev: ^1.5.4
