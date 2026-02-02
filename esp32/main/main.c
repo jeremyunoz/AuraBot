@@ -5,11 +5,23 @@
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
+#include "freertos/task.h"
 
+
+#include "freertos/event_groups.h"
 #include "wifi_connect.h"
 #include "mqtt.h"
 #include "esp_timer.h"
+#include "pir.h"
+#include "driver/gpio.h"
+#include "speaker.h"
+
+#define PIR_GPIO       GPIO_NUM_24
+#define PIR_PRESENCE_BIT  (1 << 0)
+
+static pir_t pir = {
+    .pin = PIR_GPIO,
+};
 
 static const char *TAG = "main";
 
@@ -17,33 +29,61 @@ static void publisher_task(void *arg)
 {
     (void)arg;
 
-    char payload[160];
-    int counter = 0;
+    char payload[200];
+    EventGroupHandle_t event_group = xEventGroupCreate();
+    if (event_group == NULL) {
+        ESP_LOGE(TAG, "Failed to create PIR event group");
+        vTaskDelete(NULL);
+        return;
+    }
 
+    // initialize the PIR
+    esp_err_t ret = pir_int_interrupt(&pir, event_group, PIR_PRESENCE_BIT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "PIR initialization failed: %s", esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20000)); // wait for the PIR to warm up
+
+    // publish MQTT message every time the PIR is triggered
     while (1) {
-        // Replace these placeholder values with real sensor reads.
-        int motion = 1.5;
-        float distance_cm = 42.5f;
+        EventBits_t bits = xEventGroupWaitBits(
+            event_group,
+            PIR_PRESENCE_BIT,
+            pdTRUE, pdFALSE, portMAX_DELAY
+        );
 
-        long long ts_us = (long long)esp_timer_get_time();
+        if (bits & PIR_PRESENCE_BIT) {
+            int detected_level = gpio_get_level(pir.pin);
+            if (detected_level == 1) {
+                uint32_t count = pir_get_count();
+                int motion = 1;
+                int camera_confirmed = 0;
+                float distance_cm = 0.0;
+                long long ts_us = (long long)esp_timer_get_time();
 
-        // JSON payload that your Python subscriber can decode.
-        snprintf(payload, sizeof(payload),
-                 "{\"motion\":%d,\"distance_cm\":%.2f,\"count\":%d,\"ts_us\":%lld}",
-                 motion, distance_cm, counter++, ts_us);
+                snprintf(payload, sizeof(payload),
+                         "{\"motion\":%d,\"camera_confirmed\":%d,\"distance_cm\":%.2f,\"ts_us\":%lld,\"count\":%lu}",
+                         motion, camera_confirmed, distance_cm, ts_us, (unsigned long)count);
 
-        esp_err_t err = mqtt_publish("aurabot/sensors", payload, 1, 0);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "mqtt_publish failed: %s", esp_err_to_name(err));
+                esp_err_t err = mqtt_publish("aurabot/sensors", payload, 1, 0);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "mqtt_publish failed: %s", esp_err_to_name(err));
+                }
+#if CONFIG_SPEAKER_ENABLE
+                if (speaker_is_ready()) {
+                    speaker_beep();
+                }
+#endif
+            }
         }
-
-        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
 void app_main(void)
 {
-    /* Initialize NVS (required for WiFi) */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -61,13 +101,19 @@ void app_main(void)
 
     ESP_ERROR_CHECK(wifi_connect_sta(&cfg));
 
-    // Start periodic publishing of sensor data.
+    // initialize the speaker
+#if CONFIG_SPEAKER_ENABLE
+    ret = speaker_init();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Speaker initialized");
+    } else {
+        ESP_LOGE(TAG, "Speaker init failed: %s", esp_err_to_name(ret));
+    }
+#endif
+
     xTaskCreate(publisher_task, "publisher_task", 4096, NULL, 5, NULL);
 
-    ESP_LOGI(TAG, "WiFi connected, main loop running");
-
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI(TAG, "Main loop alive");
+        vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }

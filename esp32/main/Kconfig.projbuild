@@ -66,4 +66,70 @@ menu "AuraBot Configuration"
             bool "WAPI PSK"
     endchoice
 
+    menu "Speaker (ES8311 Codec)"
+        config SPEAKER_ENABLE
+            bool "Enable speaker output"
+            default n
+            help
+                Enable speaker driver using esp_codec_dev and ES8311 codec.
+                Requires I2C (control) and I2S (audio) connected to the codec.
+
+        config SPEAKER_I2C_SCL_GPIO
+            int "I2C SCL GPIO"
+            depends on SPEAKER_ENABLE
+            default 8
+            help
+                I2C clock pin for codec control (ES8311). ESP32-P4-WIFI6: GPIO8.
+
+        config SPEAKER_I2C_SDA_GPIO
+            int "I2C SDA GPIO"
+            depends on SPEAKER_ENABLE
+            default 7
+            help
+                I2C data pin for codec control (ES8311). ESP32-P4-WIFI6: GPIO7.
+
+        config SPEAKER_I2S_BCK_GPIO
+            int "I2S BCK (Bit Clock) GPIO"
+            depends on SPEAKER_ENABLE
+            default 12
+            help
+                I2S bit clock (SCLK). ESP32-P4-WIFI6: GPIO12.
+
+        config SPEAKER_I2S_WS_GPIO
+            int "I2S WS (Word Select) GPIO"
+            depends on SPEAKER_ENABLE
+            default 10
+            help
+                I2S word select (LRCK). ESP32-P4-WIFI6: GPIO10.
+
+        config SPEAKER_I2S_DOUT_GPIO
+            int "I2S DOUT (Data Out) GPIO"
+            depends on SPEAKER_ENABLE
+            default 9
+            help
+                I2S data output to codec DAC. Matches i2s_es8311 example: ESP32-P4 GPIO9.
+
+        config SPEAKER_I2S_DIN_GPIO
+            int "I2S DIN (Data In) GPIO (-1 = unused)"
+            depends on SPEAKER_ENABLE
+            default 11
+            help
+                I2S data input from codec ADC. Matches i2s_es8311 example: ESP32-P4 GPIO11. Use -1 for output-only.
+
+        config SPEAKER_I2S_MCK_GPIO
+            int "I2S MCK (Master Clock) GPIO (-1 = unused)"
+            depends on SPEAKER_ENABLE
+            default 13
+            help
+                I2S master clock. ESP32-P4-WIFI6: GPIO13. Use -1 if unused.
+
+        config SPEAKER_PA_GPIO
+            int "PA (Power Amplifier) enable GPIO"
+            depends on SPEAKER_ENABLE
+            default 53
+            help
+                GPIO to enable the speaker power amplifier (NS4150B). ESP32-P4-WIFI6: GPIO53.
+
+    endmenu
+
 endmenu

@@ -58,9 +58,9 @@ esp_err_t mqtt_start(void)
     }
 
     esp_mqtt_client_config_t cfg = {
-        .broker.address.uri = "mqtt://192.168.1.239:1883", // CHANGE THIS FOR YOUR LOCAL MACHINE
+        .broker.address.uri = "mqtt://aurabot.local:1883", // CHANGE THIS FOR YOUR LOCAL MACHINE
         .credentials.username = "user",
-        .credentials.authentication.password = "pass",
+        .credentials.authentication.password = "231617",
     };
 
     client = esp_mqtt_client_init(&cfg);
