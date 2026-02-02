@@ -1,9 +1,36 @@
+"""
+Real-time person detection using YOLO.
+Supports Picamera2 (Pi 5 libcamera) and OpenCV V4L2. Used standalone or via run_detection_loop() for AuraBot.
+"""
 from ultralytics import YOLO
 import cv2
 import argparse
 import os
 import time
+import glob
 from pathlib import Path
+from typing import Optional
+
+# -----------------------------------------------------------------------------
+# Constants
+# -----------------------------------------------------------------------------
+DEFAULT_FRAME_SIZE = (640, 480)
+OPENCV_PROBE_TIMEOUT_MS = 500
+PERSON_CLASS_NAME = "person"
+
+
+def _empty_person_info():
+    """Standard empty detection result."""
+    return {"detected": False, "count": 0, "boxes": []}
+
+
+def _get_class_name(class_names, class_id: int) -> str:
+    """Resolve class id to name; class_names may be dict or list."""
+    if isinstance(class_names, dict):
+        return class_names.get(class_id, "")
+    if isinstance(class_names, (list, tuple)) and 0 <= class_id < len(class_names):
+        return class_names[class_id]
+    return ""
 
 
 def check_person_detection(result):
@@ -17,30 +44,33 @@ def check_person_detection(result):
             'boxes': list of dicts with 'box' and 'confidence'
         }
     """
-    person_info = {
-        'detected': False,
-        'count': 0,
-        'boxes': []
-    }
-    
-    if result.boxes is not None and len(result.boxes) > 0:
+    person_info = _empty_person_info()
+    if result is None or result.boxes is None or len(result.boxes) == 0:
+        return person_info
+    class_names = result.names
+    if class_names is None:
+        return person_info
+
+    try:
         class_ids = result.boxes.cls.cpu().numpy()
-        class_names = result.names
-        
-        for i, class_id in enumerate(class_ids):
-            if class_names[int(class_id)] == 'person':
-                person_info['detected'] = True
-                person_info['count'] += 1
-                
-                # Get bounding box and confidence
-                box = result.boxes.xyxy[i].cpu().numpy()  # [x1, y1, x2, y2]
-                confidence = float(result.boxes.conf[i].cpu().numpy())
-                
-                person_info['boxes'].append({
-                    'box': box,
-                    'confidence': confidence
-                })
-    
+        xyxy = result.boxes.xyxy
+        conf = result.boxes.conf
+        n = len(class_ids)
+        for i in range(n):
+            if i >= len(xyxy) or i >= len(conf):
+                break
+            cid = int(class_ids[i])
+            if _get_class_name(class_names, cid) != PERSON_CLASS_NAME:
+                continue
+            person_info["detected"] = True
+            person_info["count"] += 1
+            person_info["boxes"].append({
+                "box": xyxy[i].cpu().numpy(),
+                "confidence": float(conf[i].cpu().numpy()),
+            })
+    except (IndexError, KeyError, AttributeError):
+        return _empty_person_info()
+
     return person_info
 
 
@@ -98,45 +128,42 @@ def _parse_args():
     return parser.parse_args()
 
 
-def _open_capture(args):
-    """
-    Returns (next_frame_callable, cleanup_callable, fps_getter_callable)
-    - next_frame_callable() -> frame (BGR np.ndarray) or None
-    """
-    if args.capture in ("auto", "picamera2"):
+# -----------------------------------------------------------------------------
+# Capture backends
+# -----------------------------------------------------------------------------
+
+
+def _open_picamera2(args):
+    """Open Pi camera via Picamera2 (libcamera). Returns (next_frame, cleanup, fps_getter)."""
+    from picamera2 import Picamera2  # type: ignore
+    size = (args.width or DEFAULT_FRAME_SIZE[0], args.height or DEFAULT_FRAME_SIZE[1])
+    picam2 = Picamera2()
+    picam2.configure(picam2.create_video_configuration(main={"size": size}))
+    picam2.start()
+
+    def next_frame():
+        rgb = picam2.capture_array()
+        if rgb is None:
+            return None
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    def cleanup():
         try:
-            from picamera2 import Picamera2  # type: ignore
+            picam2.stop()
         except Exception:
-            if args.capture == "picamera2":
-                raise
-        else:
-            picam2 = Picamera2()
-            config = picam2.create_video_configuration(main={"size": (args.width or 640, args.height or 480)})
-            picam2.configure(config)
-            picam2.start()
+            pass
 
-            def _next_frame():
-                # Picamera2 returns RGB by default; Ultralytics accepts BGR too, but we keep BGR consistent.
-                rgb = picam2.capture_array()
-                if rgb is None:
-                    return None
-                return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    def fps_getter():
+        return float(args.fps) if args.fps else 0.0
 
-            def _cleanup():
-                try:
-                    picam2.stop()
-                except Exception:
-                    pass
+    return next_frame, cleanup, fps_getter
 
-            def _fps():
-                return float(args.fps) if args.fps else 0.0
 
-            return _next_frame, _cleanup, _fps
-
-    # Fallback: OpenCV VideoCapture
+def _open_opencv(args):
+    """Open camera via OpenCV VideoCapture. Returns (next_frame, cleanup, fps_getter)."""
     api = cv2.CAP_V4L2 if args.v4l2 else cv2.CAP_ANY
-    cap = cv2.VideoCapture(args.device if args.device else args.camera, api)
-
+    device = args.device if args.device else args.camera
+    cap = cv2.VideoCapture(device, api)
     if args.width:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(args.width))
     if args.height:
@@ -144,73 +171,264 @@ def _open_capture(args):
     if args.fps:
         cap.set(cv2.CAP_PROP_FPS, float(args.fps))
 
-    def _next_frame():
+    def next_frame():
         ok, frame = cap.read()
-        if not ok or frame is None:
-            return None
-        return frame
+        return frame if ok and frame is not None else None
 
-    def _cleanup():
+    def cleanup():
         cap.release()
 
-    def _fps():
+    def fps_getter():
         try:
             return float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         except Exception:
             return 0.0
 
-    return _next_frame, _cleanup, _fps
+    return next_frame, cleanup, fps_getter
 
 
-def main():
-    args = _parse_args()
+def _open_capture(args):
+    """
+    Open camera based on args.capture. Returns (next_frame, cleanup, fps_getter).
+    next_frame() -> BGR frame or None.
+    """
+    use_picamera2 = args.capture in ("auto", "picamera2")
+    if use_picamera2:
+        try:
+            return _open_picamera2(args)
+        except Exception:
+            if args.capture == "picamera2":
+                raise
+    return _open_opencv(args)
 
-    # Model configuration - change these if needed
-    MODEL_NAME = args.model  # NCNN format for Pi5 (faster)
-    FALLBACK_MODEL = args.fallback_model  # PyTorch format (will auto-download)
-    
-    if os.path.exists(MODEL_NAME):
-        print(f"Loading NCNN model: {MODEL_NAME}")
-        model = YOLO(MODEL_NAME, task="detect")
-    elif os.path.exists(FALLBACK_MODEL):
-        print(f"Loading PyTorch model: {FALLBACK_MODEL}")
-        model = YOLO(FALLBACK_MODEL)
-    else:
-        print(f"Model not found. Using default (will auto-download): {FALLBACK_MODEL}")
-        print("For better Pi5 performance, run: python setup_model.py")
-        model = YOLO(FALLBACK_MODEL)  # Will auto-download
-    
-    # Initialize capture
+
+def _capture_args_from_dict(config: dict):
+    """Build an args-like object from a config dict for _open_capture."""
+    class _Args:
+        pass
+    a = _Args()
+    a.capture = config.get("capture", "auto")
+    a.v4l2 = config.get("v4l2", False)
+    a.device = config.get("device", "")
+    a.camera = config.get("camera", 0)
+    a.width = config.get("width", 0)
+    a.height = config.get("height", 0)
+    a.fps = config.get("fps", 0)
+    return a
+
+
+# -----------------------------------------------------------------------------
+# Camera discovery
+# -----------------------------------------------------------------------------
+
+
+def _picamera2_importable() -> bool:
+    """Check if Picamera2 can be imported (no camera acquire). Use this to default to Pi camera."""
     try:
-        next_frame, capture_cleanup, fps_getter = _open_capture(args)
+        from picamera2 import Picamera2  # type: ignore
+        return True
+    except Exception:
+        return False
+
+
+def _probe_opencv_device(device, use_v4l2: bool = True) -> bool:
+    """Probe OpenCV capture on device (path or index). Returns True if a frame can be read."""
+    api = cv2.CAP_V4L2 if use_v4l2 else cv2.CAP_ANY
+    cap = cv2.VideoCapture(device, api)
+    if not cap.isOpened():
+        cap.release()
+        return False
+    try:
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MS, OPENCV_PROBE_TIMEOUT_MS)
+    except Exception:
+        pass
+    ok = cap.read()[0]
+    cap.release()
+    return ok
+
+
+def list_available_cameras(skip_opencv_if_picamera2_ok: bool = True):
+    """
+    Detect available cameras (Pi 5 libcamera or /dev/video*).
+    Returns list of dicts: [{"backend", "id", "ok", "error"?}, ...].
+    Picamera2 is reported from import only (no camera acquire) to avoid double-acquire.
+    """
+    out = []
+    picamera2_ok = _picamera2_importable()
+    out.append({
+        "backend": "picamera2",
+        "id": "libcamera",
+        "ok": picamera2_ok,
+        "error": None if picamera2_ok else "picamera2 not importable",
+    })
+    if skip_opencv_if_picamera2_ok and picamera2_ok:
+        return out
+    for path in sorted(glob.glob("/dev/video*")):
+        ok = _probe_opencv_device(path)
+        out.append({"backend": "opencv", "id": path, "ok": ok, "error": None if ok else "open failed or no frame"})
+    ok = _probe_opencv_device(0)
+    out.append({"backend": "opencv", "id": "0", "ok": ok, "error": None if ok else "open failed or no frame"})
+    return out
+
+
+# -----------------------------------------------------------------------------
+# Detection loop (for AuraBot integration)
+# -----------------------------------------------------------------------------
+
+
+def _load_yolo_model(model_name: str, fallback_model: str):
+    """Load YOLO model from model_name or fallback_model (auto-download if missing)."""
+    if os.path.exists(model_name):
+        return YOLO(model_name, task="detect")
+    if os.path.exists(fallback_model):
+        return YOLO(fallback_model)
+    return YOLO(fallback_model)
+
+
+def run_detection_loop(
+    callback,
+    stop_event,
+    *,
+    model_name: str = "yolo26n_ncnn_model",
+    fallback_model: str = "yolo26n.pt",
+    capture_config: Optional[dict] = None,
+    warmup_frames: int = 10,
+    read_retries: int = 50,
+    report_interval_frames: int = 15,
+):
+    """
+    Run object detection in a loop and call callback(person_info) on detection updates.
+    For AuraBot: callback receives {"detected", "count", "boxes"} or {"error": str}.
+    stop_event: threading.Event; when set, the loop exits.
+    capture_config: optional dict (capture, camera, device, width, height, fps, v4l2).
+    """
+    capture_args = _capture_args_from_dict(capture_config or {})
+    model = _load_yolo_model(model_name, fallback_model)
+
+    try:
+        next_frame, capture_cleanup, _ = _open_capture(capture_args)
     except Exception as e:
-        print(f"Error: Could not initialize capture backend ({args.capture}): {e}")
-        print("Tip (Raspberry Pi AI Camera): install and use Picamera2/libcamera stack.")
-        print("  e.g. `sudo apt install python3-picamera2` then run with `--capture picamera2`.")
+        callback({**_empty_person_info(), "error": str(e)})
         return
-    
-    save_dir: Path | None = None
-    if args.save_dir:
-        save_dir = Path(args.save_dir)
+
+    try:
+        frame_idx = 0
+        last_status = None
+        consecutive_failures = 0
+        while not stop_event.is_set():
+            frame = next_frame()
+            if frame is None:
+                consecutive_failures += 1
+                if consecutive_failures >= read_retries:
+                    break
+                time.sleep(0.05)
+                continue
+            consecutive_failures = 0
+            frame_idx += 1
+            if warmup_frames > 0 and frame_idx <= warmup_frames:
+                continue
+            results = model(frame, verbose=False)
+            person_info = check_person_detection(results[0]) if results else _empty_person_info()
+            status = (person_info["detected"], person_info["count"])
+            if status != last_status:
+                callback(person_info)
+                last_status = status
+            elif report_interval_frames > 0 and (frame_idx % report_interval_frames == 0):
+                callback(person_info)
+    except Exception as e:
+        callback({**_empty_person_info(), "error": str(e)})
+    finally:
+        try:
+            capture_cleanup()
+        except Exception:
+            pass
+
+
+# -----------------------------------------------------------------------------
+# CLI (standalone script)
+# -----------------------------------------------------------------------------
+
+
+def _main_setup_outputs(args):
+    """Prepare save_dir and output_video_path from args. Returns (save_dir, output_video_path)."""
+    save_dir = Path(args.save_dir) if args.save_dir else None
+    if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
         print(f"Saving annotated frames to: {save_dir}")
-
-    video_writer = None
     output_video_path = Path(args.output_video) if args.output_video else None
     if output_video_path:
         output_video_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Writing annotated video to: {output_video_path}")
+    return save_dir, output_video_path
 
+
+def _main_process_frame(args, model, frame, frame_idx, last_status, last_save_time, save_dir, output_video_path, video_writer, fps_getter):
+    """Run detection on one frame; update and return (person_info, annotated_frame, new_status, new_save_time, video_writer)."""
+    results = model(frame, verbose=False)
+    if not results:
+        person_info = _empty_person_info()
+        annotated_frame = frame
+    else:
+        person_info = check_person_detection(results[0])
+        annotated_frame = results[0].plot()
+    status = (person_info["detected"], person_info["count"])
+
+    if status != last_status:
+        if person_info["detected"]:
+            print(f"Person detected! Count: {person_info['count']}")
+            for idx, p in enumerate(person_info["boxes"], 1):
+                box, conf = p["box"], p["confidence"]
+                print(f"  Person {idx}: confidence={conf:.2f}, bbox=[{box[0]:.0f}, {box[1]:.0f}, {box[2]:.0f}, {box[3]:.0f}]")
+        else:
+            print("No person detected")
+    elif args.log_every > 0 and (frame_idx % args.log_every == 0):
+        print(f"Heartbeat: frame={frame_idx}, detected={person_info['detected']}, count={person_info['count']}")
+
+    vw = video_writer
+    if output_video_path and vw is None:
+        h, w = annotated_frame.shape[:2]
+        fps = float(fps_getter() or 0.0) or 20.0
+        vw = cv2.VideoWriter(str(output_video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    if vw is not None:
+        vw.write(annotated_frame)
+
+    now = time.time()
+    new_save_time = last_save_time
+    if save_dir:
+        save_periodic = args.save_every > 0 and (frame_idx % args.save_every == 0)
+        save_on_detect = args.save_on_detect and person_info["detected"] and (now - last_save_time) >= args.min_save_interval
+        if save_periodic or save_on_detect:
+            cv2.imwrite(str(save_dir / f"frame_{frame_idx:06d}.jpg"), annotated_frame)
+            new_save_time = now
+
+    return person_info, annotated_frame, status, new_save_time, vw
+
+
+def main():
+    args = _parse_args()
+    model = _load_yolo_model(args.model, args.fallback_model)
+    if not os.path.exists(args.model) and not os.path.exists(args.fallback_model):
+        print(f"Model not found. Using default (will auto-download): {args.fallback_model}")
+        print("For better Pi5 performance, run: python setup_model.py")
+
+    try:
+        next_frame, capture_cleanup, fps_getter = _open_capture(args)
+    except Exception as e:
+        print(f"Error: Could not initialize capture backend ({args.capture}): {e}")
+        print("Tip (Raspberry Pi): sudo apt install python3-picamera2 then run with --capture picamera2")
+        return
+
+    save_dir, output_video_path = _main_setup_outputs(args)
     print("Starting real-time object detection (headless). Press Ctrl+C to stop.")
 
     frame_idx = 0
-    last_status = None  # (detected: bool, count: int)
+    last_status = None
     last_save_time = 0.0
     consecutive_failures = 0
+    video_writer = None
 
     try:
         while True:
-            # Read frame from webcam
             frame = next_frame()
             if frame is None:
                 consecutive_failures += 1
@@ -221,64 +439,15 @@ def main():
                     break
                 time.sleep(0.05)
                 continue
-
-            # Reset failure counter on success
             consecutive_failures = 0
-
             frame_idx += 1
             if args.warmup_frames > 0 and frame_idx <= args.warmup_frames:
                 continue
 
-            # Run YOLO detection on the frame
-            results = model(frame, verbose=False)
-            result = results[0]  # one frame -> one result
-
-            # Check for person detection using the helper function
-            person_info = check_person_detection(result)
-
-            status = (person_info["detected"], person_info["count"])
-            if status != last_status:
-                if person_info["detected"]:
-                    print(f"Person detected! Count: {person_info['count']}")
-                    for idx, person in enumerate(person_info["boxes"], 1):
-                        box = person["box"]
-                        conf = person["confidence"]
-                        print(
-                            f"  Person {idx}: confidence={conf:.2f}, "
-                            f"bbox=[{box[0]:.0f}, {box[1]:.0f}, {box[2]:.0f}, {box[3]:.0f}]"
-                        )
-                else:
-                    print("No person detected")
-                last_status = status
-            elif args.log_every > 0 and (frame_idx % args.log_every == 0):
-                print(f"Heartbeat: frame={frame_idx}, detected={person_info['detected']}, count={person_info['count']}")
-
-            annotated_frame = result.plot()
-
-            # Lazy-init video writer once we know frame size
-            if output_video_path and video_writer is None:
-                height, width = annotated_frame.shape[:2]
-                fps = float(fps_getter() or 0.0)
-                if fps <= 0:
-                    fps = 20.0
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                video_writer = cv2.VideoWriter(str(output_video_path), fourcc, fps, (width, height))
-
-            if video_writer is not None:
-                video_writer.write(annotated_frame)
-
-            now = time.time()
-            should_save_periodic = save_dir is not None and args.save_every > 0 and (frame_idx % args.save_every == 0)
-            should_save_on_detect = (
-                save_dir is not None
-                and args.save_on_detect
-                and person_info["detected"]
-                and (now - last_save_time) >= args.min_save_interval
+            person_info, _, last_status, last_save_time, video_writer = _main_process_frame(
+                args, model, frame, frame_idx, last_status, last_save_time,
+                save_dir, output_video_path, video_writer, fps_getter
             )
-            if should_save_periodic or should_save_on_detect:
-                out_path = save_dir / f"frame_{frame_idx:06d}.jpg"
-                cv2.imwrite(str(out_path), annotated_frame)
-                last_save_time = now
 
             if args.max_frames > 0 and frame_idx >= args.max_frames:
                 print(f"Reached max frames ({args.max_frames}). Stopping.")

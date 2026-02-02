@@ -13,6 +13,7 @@ from time import sleep
 from typing import Optional, Dict, List
 from mqtt_api import MQTTAPI
 from mqtt_integration import MQTTIntegration
+from vision_integration import start_vision_integration
 from dashboard_api import run_dashboard
 from dotenv import load_dotenv
 import os
@@ -24,7 +25,7 @@ load_dotenv()
 
 # Configuration
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "stt_tts_test.log")
+LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "aurabot_conversation.log")
 AUDIO_HANDOFF_DELAY = 0.5  # Delay for audio device handoff
 SHUTDOWN_DELAY = 0.5  # Delay before shutdown
 
@@ -38,6 +39,7 @@ class AuraBot:
                  log_file: Optional[str] = None,
                  custom_responses: Optional[Dict[str, str]] = None,
                  enable_mqtt: bool = True,
+                 enable_vision: bool = False,
                  wellness_threshold_seconds: Optional[int] = None,
                  wellness_break_duration_seconds: Optional[int] = None):
         """
@@ -48,6 +50,7 @@ class AuraBot:
             log_file: Optional custom log file path
             custom_responses: Optional custom response dictionary
             enable_mqtt: Whether to enable MQTT integration for sensor data
+            enable_vision: Whether to use camera for presence (person detection); requires enable_mqtt
             wellness_threshold_seconds: Seconds of sitting before triggering wellness timer
                                       (None uses default from WellnessTimerTrigger)
             wellness_break_duration_seconds: Duration of wellness break timer in seconds
@@ -85,6 +88,7 @@ class AuraBot:
                 self.logger.log_error(f"Could not initialize MQTT integration: {e}")
                 self.logger.log_general("Continuing without MQTT support...", "WARNING")
         
+        self._enable_vision = enable_vision
         self._is_running = False
     
     def start(self):
@@ -98,6 +102,14 @@ class AuraBot:
                 self.logger.log_mqtt("MQTT integration enabled - sensor data will trigger wellness timers", "INFO")
             except Exception as e:
                 self.logger.log_error(f"MQTT integration failed to start: {e}")
+        
+        # Start vision (camera) integration if enabled; feeds camera_confirmed into MQTT sensor API
+        if self._enable_vision and self.mqtt_api:
+            try:
+                start_vision_integration(self)
+                self.logger.log_general("Vision integration enabled - camera will drive presence/session", "INFO")
+            except Exception as e:
+                self.logger.log_error(f"Vision integration failed to start: {e}")
         
         self._speak_safely(self.greeting)
         self._run_conversation_loop()
@@ -310,11 +322,13 @@ def main():
     
     Configuration via environment variables:
     - ENABLE_MQTT: Set to "false" to disable MQTT (default: enabled)
+    - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
     - WELLNESS_THRESHOLD_SECONDS: Sitting time threshold before wellness timer triggers
     - WELLNESS_BREAK_DURATION_SECONDS: Duration of wellness break timer
     """
     # Check MQTT enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
+    enable_vision = os.getenv("ENABLE_VISION", "false").lower() == "true"
     
     # Get wellness configuration from environment variables
     env_threshold = os.getenv("WELLNESS_THRESHOLD_SECONDS")
@@ -326,6 +340,7 @@ def main():
     # Create AuraBot instance
     bot = AuraBot(
         enable_mqtt=enable_mqtt,
+        enable_vision=enable_vision,
         wellness_threshold_seconds=wellness_threshold,
         wellness_break_duration_seconds=break_duration
     )
@@ -344,6 +359,9 @@ def main():
             config_msg += f" Break duration: {break_duration}s ({minutes}m)"
             metadata["break_duration_seconds"] = break_duration
         bot.logger.log_wellness(config_msg, "INFO", metadata=metadata if metadata else None)
+    
+    if enable_vision:
+        bot.logger.log_general("Vision (camera) enabled for presence detection", "INFO")
     
     # Start dashboard in background thread
     dashboard_port = int(os.getenv("DASHBOARD_PORT", "8000"))
