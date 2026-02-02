@@ -74,6 +74,8 @@ class MQTTAPI:
         # This prevents time accumulation if sensor data stops when user leaves
         self._sensor_timeout_seconds = 30.0  # Auto-pause after 30 seconds of no sensor data
         self._last_sensor_time: Optional[float] = None
+        # Last time we received aurabot/status with esp32 in topic or payload (dashboard ESP32 status only)
+        self._last_esp32_message_time: Optional[float] = None
         self._timeout_check_thread: Optional[threading.Thread] = None
         self._stop_timeout_check = threading.Event()
         
@@ -268,6 +270,21 @@ class MQTTAPI:
         self._last_camera_confirmed = camera_confirmed
         
         return response
+    
+    def record_esp32_message_received(self) -> None:
+        """Record that we received an ESP32 status message (aurabot/status with esp32). Call from MQTT integration only."""
+        self._last_esp32_message_time = time.time()
+
+    def get_esp32_last_seen(self) -> Optional[float]:
+        """Return Unix timestamp of last ESP32 status (aurabot/status with esp32), or None if never received."""
+        return self._last_esp32_message_time
+
+    def is_esp32_online(self, within_seconds: float = 60.0) -> bool:
+        """Return True if we received aurabot/status with esp32 within the given seconds."""
+        t = self.get_esp32_last_seen()
+        if t is None:
+            return False
+        return (time.time() - t) <= within_seconds
     
     def _start_timeout_monitoring(self):
         """Start background thread to monitor sensor data timeout and auto-pause."""

@@ -6,7 +6,7 @@ Factory-based MQTT client setup and lifecycle management.
 import json
 import os
 import threading
-from typing import Optional, Callable
+from typing import Optional
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
 
@@ -121,6 +121,9 @@ class MQTTIntegration:
                         "INFO",
                         metadata={"topic": msg.topic, "status": response.get('status')}
                     )
+                elif msg.topic == "aurabot/status" or msg.topic.startswith("aurabot/status/"):
+                    if "esp32" in msg.topic or (isinstance(data, dict) and "esp32" in data) or "esp32" in payload:
+                        self.mqtt_api.record_esp32_message_received()
                 else:
                     self.mqtt_api.logger.log_mqtt(f"Unhandled topic: {msg.topic}", "WARNING")
                     
