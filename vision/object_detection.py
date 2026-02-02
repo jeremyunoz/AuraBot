@@ -9,7 +9,7 @@ import os
 import time
 import glob
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -295,12 +295,14 @@ def run_detection_loop(
     warmup_frames: int = 10,
     read_retries: int = 50,
     report_interval_frames: int = 15,
+    on_frame: Optional[Callable[[], None]] = None,
 ):
     """
     Run object detection in a loop and call callback(person_info) on detection updates.
     For AuraBot: callback receives {"detected", "count", "boxes"} or {"error": str}.
     stop_event: threading.Event; when set, the loop exits.
     capture_config: optional dict (capture, camera, device, width, height, fps, v4l2).
+    on_frame: optional callable(); called every successful frame after warmup (e.g. for dashboard heartbeat).
     """
     capture_args = _capture_args_from_dict(capture_config or {})
     model = _load_yolo_model(model_name, fallback_model)
@@ -327,6 +329,11 @@ def run_detection_loop(
             frame_idx += 1
             if warmup_frames > 0 and frame_idx <= warmup_frames:
                 continue
+            if on_frame:
+                try:
+                    on_frame()
+                except Exception:
+                    pass
             results = model(frame, verbose=False)
             person_info = check_person_detection(results[0]) if results else _empty_person_info()
             status = (person_info["detected"], person_info["count"])

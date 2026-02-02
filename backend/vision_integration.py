@@ -7,6 +7,7 @@ so session start/pause and wellness logic use the camera as a presence source.
 import os
 import sys
 import threading
+import time
 from typing import Any, Optional, Tuple
 
 # Default model names (paths resolved relative to project/vision)
@@ -105,6 +106,10 @@ def start_vision_integration(
     def on_detection(person_info: dict) -> None:
         _send_presence_to_mqtt(aurabot, person_info)
 
+    def on_frame_heartbeat() -> None:
+        """Called every successful frame so dashboard camera status updates promptly."""
+        setattr(aurabot, "last_camera_activity", time.time())
+
     def run_vision_thread() -> None:
         project_root = os.path.dirname(backend_dir)
         if project_root not in sys.path:
@@ -126,6 +131,7 @@ def start_vision_integration(
             warmup_frames=warmup_frames,
             read_retries=read_retries,
             report_interval_frames=report_interval_frames,
+            on_frame=on_frame_heartbeat,
         )
 
     thread = threading.Thread(target=run_vision_thread, daemon=True)
