@@ -35,6 +35,7 @@ header h1 {
 
 .status-indicator {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
 }
 
@@ -55,7 +56,8 @@ header h1 {
     color: white;
 }
 
-.status-badge.unknown {
+.status-badge.unknown,
+.status-badge.status-checking {
     background: #6b7280;
     color: white;
 }

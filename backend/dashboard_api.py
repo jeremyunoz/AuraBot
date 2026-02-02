@@ -5,6 +5,7 @@ Serves status, session history, control, and config over HTTP.
 
 import os
 import threading
+import time
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request, HTTPException
@@ -63,6 +64,22 @@ def _build_status(bot) -> dict:
         out["mqtt_connected"] = bot.mqtt_integration.is_connected()
     else:
         out["mqtt_connected"] = False
+
+    # ESP32: online if we received aurabot/status with esp32 recently (within 60s)
+    if bot.mqtt_api:
+        out["esp32_online"] = bot.mqtt_api.is_esp32_online(within_seconds=60.0)
+    else:
+        out["esp32_online"] = False
+
+    # Camera: online if vision enabled and frames received recently (within 60s)
+    camera_enabled = getattr(bot, "_enable_vision", False)
+    out["camera_enabled"] = camera_enabled
+    last_camera = getattr(bot, "last_camera_activity", None)
+    out["camera_online"] = (
+        camera_enabled
+        and last_camera is not None
+        and (time.time() - last_camera) <= 60.0
+    )
 
     return out
 

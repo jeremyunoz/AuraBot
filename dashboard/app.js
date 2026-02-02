@@ -120,6 +120,25 @@ function updateMQTTStatus(connected) {
     statusEl.className = `status-badge ${connected ? 'connected' : 'disconnected'}`;
 }
 
+// Update ESP32 status (online when we received sensor data recently)
+function updateESP32Status(online) {
+    const statusEl = document.getElementById('esp32-status');
+    statusEl.textContent = `ESP32: ${online ? 'Online' : 'Offline'}`;
+    statusEl.className = `status-badge ${online ? 'connected' : 'disconnected'}`;
+}
+
+// Update Camera status (online when vision enabled and receiving frames; disabled when vision off)
+function updateCameraStatus(online, enabled) {
+    const statusEl = document.getElementById('camera-status');
+    if (!enabled) {
+        statusEl.textContent = 'Camera: Disabled';
+        statusEl.className = 'status-badge unknown';
+        return;
+    }
+    statusEl.textContent = `Camera: ${online ? 'Online' : 'Offline'}`;
+    statusEl.className = `status-badge ${online ? 'connected' : 'disconnected'}`;
+}
+
 // Fetch and update status
 async function fetchStatus() {
     try {
@@ -131,10 +150,15 @@ async function fetchStatus() {
         updateSession(data);
         updateTimers(data);
         updateWellnessConfig(data);
-        updateMQTTStatus(data.mqtt_connected || false);
+        // Status badges: use explicit checks so missing keys (e.g. old API) still update
+        updateMQTTStatus(Boolean(data.mqtt_connected));
+        updateESP32Status(Boolean(data.esp32_online));
+        updateCameraStatus(Boolean(data.camera_online), data.camera_enabled === true);
     } catch (error) {
         console.error('Error fetching status:', error);
         updateMQTTStatus(false);
+        updateESP32Status(false);
+        updateCameraStatus(false, false);
     }
 }
 
