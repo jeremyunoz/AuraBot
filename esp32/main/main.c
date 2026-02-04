@@ -30,7 +30,7 @@ static void publisher_task(void *arg)
 {
     (void)arg;
 
-    char payload[200];
+    char payload[96];
     EventGroupHandle_t event_group = xEventGroupCreate();
     if (event_group == NULL) {
         ESP_LOGE(TAG, "Failed to create PIR event group");
@@ -61,13 +61,11 @@ static void publisher_task(void *arg)
             if (detected_level == 1) {
                 uint32_t count = pir_get_count();
                 int motion = 1;
-                int camera_confirmed = 0;
-                float distance_cm = 0.0;
                 long long ts_us = (long long)esp_timer_get_time();
 
                 snprintf(payload, sizeof(payload),
-                         "{\"motion\":%d,\"camera_confirmed\":%d,\"distance_cm\":%.2f,\"ts_us\":%lld,\"count\":%lu}",
-                         motion, camera_confirmed, distance_cm, ts_us, (unsigned long)count);
+                         "{\"motion\":%d,\"ts_us\":%lld,\"count\":%lu}",
+                         motion, ts_us, (unsigned long)count);
 
                 esp_err_t err = mqtt_publish("aurabot/sensors", payload, 1, 0);
                 if (err != ESP_OK) {
