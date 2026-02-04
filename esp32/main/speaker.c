@@ -39,18 +39,9 @@
 #error "Speaker driver requires ES8311. Enable CONFIG_CODEC_ES8311_SUPPORT in esp_codec_dev."
 #endif
 
-static const char *TAG = "speaker";
+#include "speaker_config.h"
 
-/* --- Pin config (from Kconfig) --- */
-#define I2C_NUM           I2C_NUM_0
-#define I2C_SCL_GPIO      CONFIG_SPEAKER_I2C_SCL_GPIO
-#define I2C_SDA_GPIO      CONFIG_SPEAKER_I2C_SDA_GPIO
-#define I2S_BCK_GPIO      CONFIG_SPEAKER_I2S_BCK_GPIO
-#define I2S_WS_GPIO       CONFIG_SPEAKER_I2S_WS_GPIO
-#define I2S_DOUT_GPIO     CONFIG_SPEAKER_I2S_DOUT_GPIO
-#define I2S_DIN_GPIO      CONFIG_SPEAKER_I2S_DIN_GPIO
-#define I2S_MCK_GPIO      CONFIG_SPEAKER_I2S_MCK_GPIO
-#define PA_GPIO           CONFIG_SPEAKER_PA_GPIO
+static const char *TAG = "speaker";
 
 /* --- State --- */
 #if USE_I2C_MASTER
@@ -77,9 +68,9 @@ static esp_err_t i2c_init(void)
 {
 #if USE_I2C_MASTER
     i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = I2C_NUM,
-        .sda_io_num = I2C_SDA_GPIO,
-        .scl_io_num = I2C_SCL_GPIO,
+        .i2c_port = SPEAKER_I2C_NUM,
+        .sda_io_num = SPEAKER_I2C_SDA_GPIO,
+        .scl_io_num = SPEAKER_I2C_SCL_GPIO,
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true, // using internal pullup on the board but better use external pullup resistor around 4.7k to 10k (standard time mode is 100kHz)
@@ -92,18 +83,18 @@ static esp_err_t i2c_init(void)
 #else
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_SDA_GPIO,
-        .scl_io_num = I2C_SCL_GPIO,
+        .sda_io_num = SPEAKER_I2C_SDA_GPIO,
+        .scl_io_num = SPEAKER_I2C_SCL_GPIO,
         .sda_pullup_en = GPIO_PULLUP_ENABLE,
         .scl_pullup_en = GPIO_PULLUP_ENABLE,
         .master.clk_speed = 100000,
     };
-    esp_err_t ret = i2c_param_config(I2C_NUM, &conf);
+    esp_err_t ret = i2c_param_config(SPEAKER_I2C_NUM, &conf);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C param_config failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ret = i2c_driver_install(I2C_NUM, conf.mode, 0, 0, 0);
+    ret = i2c_driver_install(SPEAKER_I2C_NUM, conf.mode, 0, 0, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C driver install failed: %s", esp_err_to_name(ret));
         return ret;
@@ -122,15 +113,13 @@ static void i2c_deinit(void)
     }
 #else
     if (s_i2c_installed) {
-        i2c_driver_delete(I2C_NUM);
+        i2c_driver_delete(SPEAKER_I2C_NUM);
         s_i2c_installed = false;
     }
 #endif
 }
 
 /* --- I2S --- */
-#define I2S_MCLK_MULTIPLE  384  /* Match i2s_es8311 example; 256 ok for 16-bit */
-
 static esp_err_t i2s_init(void)
 {
     /* Match working i2s_es8311 example: auto_clear so DMA buffer has no legacy garbage */
@@ -149,14 +138,14 @@ static esp_err_t i2s_init(void)
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(16, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
-            .mclk = I2S_MCK_GPIO,
-            .bclk = I2S_BCK_GPIO,
-            .ws = I2S_WS_GPIO,
-            .dout = I2S_DOUT_GPIO,
-            .din = I2S_DIN_GPIO,
+            .mclk = SPEAKER_I2S_MCK_GPIO,
+            .bclk = SPEAKER_I2S_BCK_GPIO,
+            .ws = SPEAKER_I2S_WS_GPIO,
+            .dout = SPEAKER_I2S_DOUT_GPIO,
+            .din = SPEAKER_I2S_DIN_GPIO,
         },
     };
-    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE;
+    std_cfg.clk_cfg.mclk_multiple = SPEAKER_I2S_MCLK_MULTIPLE;
 
     ret = i2s_channel_init_std_mode(s_tx_handle, &std_cfg);
     if (ret != ESP_OK) {
@@ -187,17 +176,17 @@ static void i2s_deinit(void)
 /* --- Codec setup --- */
 static void pa_gpio_enable(void)
 {
-    if (PA_GPIO < 0) return;
+    if (SPEAKER_PA_GPIO < 0) return;
 
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << PA_GPIO),
+        .pin_bit_mask = (1ULL << SPEAKER_PA_GPIO),
         .mode = GPIO_MODE_OUTPUT,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
-    gpio_set_level(PA_GPIO, 1);
+    gpio_set_level(SPEAKER_PA_GPIO, 1);
     vTaskDelay(pdMS_TO_TICKS(100));  /* NS4150B amp power-up */
 }
 
@@ -211,7 +200,7 @@ static esp_err_t create_codec_device(void)
 #if USE_I2C_MASTER
     i2c_cfg.bus_handle = s_i2c_bus;
 #else
-    i2c_cfg.port = I2C_NUM;
+    i2c_cfg.port = SPEAKER_I2C_NUM;
 #endif
 
     s_data_if = audio_codec_new_i2s_data(&i2s_cfg);
@@ -227,8 +216,8 @@ static esp_err_t create_codec_device(void)
         .codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC,
         .ctrl_if = s_ctrl_if,
         .gpio_if = s_gpio_if,
-        .pa_pin = PA_GPIO,
-        .use_mclk = (I2S_MCK_GPIO >= 0),
+        .pa_pin = SPEAKER_PA_GPIO,
+        .use_mclk = (SPEAKER_I2S_MCK_GPIO >= 0),
     };
     s_codec_if = es8311_codec_new(&es8311_cfg);
     if (!s_codec_if) return ESP_FAIL;
@@ -299,7 +288,7 @@ esp_err_t speaker_init(void)
     pa_gpio_enable();
 
     s_initialized = true;
-    ESP_LOGI(TAG, "Speaker initialized (ES8311, PA_GPIO=%d)", PA_GPIO);
+    ESP_LOGI(TAG, "Speaker initialized (ES8311, PA_GPIO=%d)", SPEAKER_PA_GPIO);
     return ESP_OK;
 }
 
@@ -466,7 +455,7 @@ static void mono_to_stereo_interleaved(const int16_t *mono, int16_t *stereo, siz
 
 esp_err_t speaker_beep(void)
 {
-    if (PA_GPIO >= 0) gpio_set_level(PA_GPIO, 1);
+    if (SPEAKER_PA_GPIO >= 0) gpio_set_level(SPEAKER_PA_GPIO, 1);
 
     esp_err_t ret = speaker_open(BEEP_SR, 2);
     if (ret != ESP_OK) {
