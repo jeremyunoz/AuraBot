@@ -7,6 +7,7 @@ import cv2
 import argparse
 import os
 import time
+import threading
 import glob
 from pathlib import Path
 from typing import Callable, Optional
@@ -296,6 +297,7 @@ def run_detection_loop(
     read_retries: int = 50,
     report_interval_frames: int = 15,
     on_frame: Optional[Callable[[], None]] = None,
+    ready_event: Optional[threading.Event] = None,
 ):
     """
     Run object detection in a loop and call callback(person_info) on detection updates.
@@ -303,32 +305,56 @@ def run_detection_loop(
     stop_event: threading.Event; when set, the loop exits.
     capture_config: optional dict (capture, camera, device, width, height, fps, v4l2).
     on_frame: optional callable(); called every successful frame after warmup (e.g. for dashboard heartbeat).
+    ready_event: optional threading.Event; signaled when model is loaded, camera is open, and warmup is complete.
     """
     capture_args = _capture_args_from_dict(capture_config or {})
+    
+    # Load model (this can take time)
     model = _load_yolo_model(model_name, fallback_model)
 
     try:
+        # Open camera
         next_frame, capture_cleanup, _ = _open_capture(capture_args)
     except Exception as e:
         callback({**_empty_person_info(), "error": str(e)})
+        # Signal ready_event even on error so main thread doesn't wait forever
+        if ready_event:
+            ready_event.set()
         return
 
+    # Signal ready immediately if warmup is disabled (model loaded, camera open)
+    if ready_event and warmup_frames == 0:
+        ready_event.set()
+    
     try:
         frame_idx = 0
         last_status = None
         consecutive_failures = 0
+        warmup_complete = warmup_frames == 0  # Already signaled if warmup disabled
+        
         while not stop_event.is_set():
             frame = next_frame()
             if frame is None:
                 consecutive_failures += 1
                 if consecutive_failures >= read_retries:
+                    # Signal ready_event on failure so main thread doesn't wait forever
+                    if ready_event and not warmup_complete:
+                        ready_event.set()
                     break
                 time.sleep(0.05)
                 continue
             consecutive_failures = 0
             frame_idx += 1
+            
+            # Complete warmup before signaling ready
             if warmup_frames > 0 and frame_idx <= warmup_frames:
                 continue
+            
+            # Signal ready after warmup is complete (only once)
+            if not warmup_complete and ready_event:
+                ready_event.set()
+                warmup_complete = True
+            
             if on_frame:
                 try:
                     on_frame()

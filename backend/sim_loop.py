@@ -99,6 +99,7 @@ class AuraBot:
         
         self._enable_vision = enable_vision
         self._vision_stop_event = None
+        self._vision_ready_event = None
         self._is_running = False
     
     def start(self):
@@ -117,11 +118,19 @@ class AuraBot:
         if self._enable_vision and self.mqtt_api:
             try:
                 self.mqtt_api.set_presence_fusion(True)  # Require camera AND PIR to infer presence
-                self._vision_stop_event = start_vision_integration(self)
+                self._vision_stop_event, self._vision_ready_event = start_vision_integration(self)
                 self.logger.log_general(
                     "Vision integration enabled - presence requires both camera and PIR motion",
                     "INFO",
                 )
+                # Wait for vision model to load, camera to initialize, and warmup to complete
+                if self._vision_ready_event:
+                    self.logger.log_general("Waiting for vision model to load and calibrate...", "INFO")
+                    self._vision_ready_event.wait(timeout=10.0)  # Wait up to 10 seconds
+                    if self._vision_ready_event.is_set():
+                        self.logger.log_general("Vision model loaded and calibrated - ready to process", "INFO")
+                    else:
+                        self.logger.log_general("Vision initialization timeout - continuing anyway", "WARNING")
             except Exception as e:
                 self.logger.log_error(f"Vision integration failed to start: {e}")
         

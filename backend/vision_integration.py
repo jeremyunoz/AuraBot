@@ -84,23 +84,25 @@ def start_vision_integration(
     warmup_frames: int = 10,
     read_retries: int = 50,
     report_interval_frames: int = 15,
-) -> Optional[threading.Event]:
+) -> Tuple[Optional[threading.Event], Optional[threading.Event]]:
     """
     Start camera-based person detection in a daemon thread and feed presence into AuraBot.
 
     When a person is detected, calls aurabot.mqtt_api.handle_sensor_data() with
     camera_confirmed=1 so session/wellness logic runs as with hardware sensors.
 
-    Requires aurabot.mqtt_api. Returns a stop_event, or None if vision could not be started.
+    Requires aurabot.mqtt_api. Returns (stop_event, ready_event) tuple, or (None, None) if vision could not be started.
+    ready_event is signaled when model is loaded, camera is open, and warmup is complete.
     """
     if not getattr(aurabot, "mqtt_api", None):
         if getattr(aurabot, "logger", None):
             aurabot.logger.log_general("Vision integration skipped: MQTT API not available", "WARNING")
-        return None
+        return None, None
 
     backend_dir = os.path.dirname(os.path.abspath(__file__))
     model_path, fallback_path = _resolve_vision_paths(backend_dir, model_name, fallback_model)
     stop_event = threading.Event()
+    ready_event = threading.Event()
 
     def on_detection(person_info: dict) -> None:
         _send_presence_to_mqtt(aurabot, person_info)
@@ -131,8 +133,9 @@ def start_vision_integration(
             read_retries=read_retries,
             report_interval_frames=report_interval_frames,
             on_frame=on_frame_heartbeat,
+            ready_event=ready_event,
         )
 
     thread = threading.Thread(target=run_vision_thread, daemon=True)
     thread.start()
-    return stop_event
+    return stop_event, ready_event
