@@ -67,6 +67,9 @@ class MQTTAPI:
         self._last_esp32_motion: Optional[int] = None
         self._last_esp32_time: Optional[float] = None
         self._esp32_state_ttl_seconds = 30.0  # Use last PIR state for this long when fusing
+        # Last camera state (so PIR-only updates don't overwrite it)
+        self._last_camera_time: Optional[float] = None
+        self._camera_state_ttl_seconds = 30.0  # Use last camera state for this long when fusing
         
         # Debounce configuration: require N consecutive readings before state change
         self._presence_stable_count = 2  # Need 2 consecutive "present" readings to start session
@@ -122,7 +125,7 @@ class MQTTAPI:
         Expected format:
         {
             "motion": 0 | 1,
-            "camera_confirmed": 0 | 1,  # or "camera": 0 | 1
+            "camera_confirmed": 0 | 1,  # optional; or "camera": 0 | 1
             "ts_us": int (optional),
             "count": int (optional)
         }
@@ -143,9 +146,10 @@ class MQTTAPI:
         
         # Extract values
         motion = self._coerce_binary(data.get("motion"))
-        camera_confirmed = self._coerce_binary(
-            data.get("camera_confirmed", data.get("camera"))
-        )
+        # camera_confirmed is optional (PIR-only payloads from ESP32 won't include it)
+        camera_raw = data.get("camera_confirmed", data.get("camera"))
+        camera_in_payload = camera_raw is not None
+        camera_confirmed = self._coerce_binary(camera_raw) if camera_in_payload else None
         
         # Update last sensor time for timeout monitoring
         self._last_sensor_time = time.time()
@@ -154,9 +158,14 @@ class MQTTAPI:
         from_esp32 = (
             data.get("ts_us") is not None or data.get("count") is not None or motion == 1
         )
+        from_camera = camera_in_payload and not from_esp32
         if from_esp32:
             self._last_esp32_motion = motion
             self._last_esp32_time = time.time()
+        if from_camera:
+            # camera_confirmed is guaranteed non-None when camera_in_payload is True
+            self._last_camera_confirmed = camera_confirmed  # type: ignore[assignment]
+            self._last_camera_time = time.time()
         
         # Effective PIR motion for presence: use this payload if from ESP32, else last ESP32 state within TTL
         now = time.time()
@@ -170,11 +179,28 @@ class MQTTAPI:
             effective_motion = self._last_esp32_motion if self._last_esp32_motion is not None else 0
         else:
             effective_motion = 0
-        
-        # 1. Calculate presence: require BOTH camera AND PIR motion
-        is_present = (
-            camera_confirmed == 1 and effective_motion >= self._motion_threshold
+
+        # Effective camera_confirmed for presence: use this payload if from camera, else last camera state within TTL
+        cam_valid = (
+            self._last_camera_time is not None and
+            (now - self._last_camera_time) <= self._camera_state_ttl_seconds
         )
+        if from_camera and camera_confirmed is not None:
+            effective_camera_confirmed = camera_confirmed
+        elif cam_valid:
+            effective_camera_confirmed = self._last_camera_confirmed if self._last_camera_confirmed is not None else 0
+        else:
+            effective_camera_confirmed = 0
+        
+        # 1. Calculate presence
+        pir_present = effective_motion >= self._motion_threshold
+        cam_present = effective_camera_confirmed == 1
+        if self._require_pir_with_camera:
+            # Fusion mode: require BOTH camera AND PIR motion.
+            is_present = cam_present and pir_present
+        else:
+            # Non-fusion mode: either source can indicate presence.
+            is_present = cam_present or pir_present
         
         # Check if wellness timer is active - if so, don't resume session timer
         # User should complete the break before session resumes
@@ -187,10 +213,21 @@ class MQTTAPI:
         response = {
             "status": "processed",
             "motion": motion,
-            "camera_confirmed": camera_confirmed,
+            # Raw camera field for debugging; may be None on PIR-only payloads.
+            "camera_confirmed": camera_confirmed if camera_confirmed is not None else 0,
+            "effective_camera_confirmed": effective_camera_confirmed,
             "presence": is_present,
             "presence_fusion": self._require_pir_with_camera,
             "effective_motion": effective_motion,
+            "pir_present": pir_present,
+            "camera_present": cam_present,
+            "sources": {
+                "from_esp32": from_esp32,
+                "from_camera": from_camera,
+                "camera_in_payload": camera_in_payload,
+                "esp32_state_valid": esp32_valid,
+                "camera_state_valid": cam_valid,
+            },
             "wellness_timer_active": wellness_timer_active,
             "debounce": {
                 "consecutive_present": self._consecutive_present_count,
@@ -289,7 +326,9 @@ class MQTTAPI:
         
         # Update last sensor readings
         self._last_motion = motion
-        self._last_camera_confirmed = camera_confirmed
+        # Keep the last camera_confirmed we actually observed in a camera payload
+        if camera_confirmed is not None:
+            self._last_camera_confirmed = camera_confirmed
         
         return response
     
@@ -521,19 +560,18 @@ class MQTTAPI:
         if "motion" not in data:
             return False
         
-        if "camera_confirmed" not in data and "camera" not in data:
-            return False
-        
         # Validate types
         motion = self._coerce_binary(data.get("motion"))
         if motion is None:
             return False
-        
-        camera_confirmed = self._coerce_binary(
-            data.get("camera_confirmed", data.get("camera"))
-        )
-        if camera_confirmed is None:
-            return False
+
+        # camera_confirmed is optional; if present it must be a 0/1-like value
+        if "camera_confirmed" in data or "camera" in data:
+            camera_confirmed = self._coerce_binary(
+                data.get("camera_confirmed", data.get("camera"))
+            )
+            if camera_confirmed is None:
+                return False
         
         return True
     
