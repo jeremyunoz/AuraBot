@@ -83,8 +83,13 @@ class MQTTAPI:
         self._last_sensor_time: Optional[float] = None
         # Last time we received aurabot/status with esp32 in topic or payload (dashboard ESP32 status only)
         self._last_esp32_message_time: Optional[float] = None
+        # Last TTS ack from ESP32 (aurabot/tts/ack)
+        self._last_tts_ack: Optional[Dict] = None
+        self._last_tts_ack_time: Optional[float] = None
         self._timeout_check_thread: Optional[threading.Thread] = None
         self._stop_timeout_check = threading.Event()
+        # Suppress repeated "session held" logs during wellness breaks
+        self._wellness_hold_logged = False
         
         # Start timeout monitoring
         self._start_timeout_monitoring()
@@ -208,6 +213,9 @@ class MQTTAPI:
             timer_type=TimerManager.TIMER_TYPE_WELLNESS
         )
         wellness_timer_active = len(active_wellness_timers) > 0
+        if not wellness_timer_active:
+            # Reset log suppression after wellness break ends
+            self._wellness_hold_logged = False
         
         # Build response with current state
         response = {
@@ -284,12 +292,13 @@ class MQTTAPI:
                 # User is present but wellness timer is active - don't resume session
                 # Counter is not incremented during break, so we'll need fresh readings after break ends
                 response["actions"].append("session_held_for_wellness_break")
-                if self.logger:
+                if self.logger and not self._wellness_hold_logged:
                     self.logger.log_wellness(
                         "Session resume blocked: wellness break active",
                         "INFO",
                         metadata={"presence_stable_count": self._presence_stable_count}
                     )
+                    self._wellness_hold_logged = True
         else:
             # Increment absent counter, reset present counter
             self._consecutive_absent_count += 1
@@ -504,6 +513,48 @@ class MQTTAPI:
             return {"status": "error", "error": str(e)}
         except Exception as e:
             return {"status": "error", "error": f"Unexpected error: {str(e)}"}
+
+    def handle_tts_ack(self, data: dict) -> dict:
+        """
+        Process TTS acknowledgements from ESP32.
+
+        Expected format:
+        {
+            "device": "esp32",
+            "type": "tts",
+            "status": "queued" | "error",
+            "len": int
+        }
+        """
+        if not isinstance(data, dict):
+            return {"status": "error", "error": "Invalid ack payload"}
+
+        device = data.get("device")
+        ack_type = data.get("type")
+        status = data.get("status")
+        length = data.get("len")
+
+        if device != "esp32" or ack_type != "tts":
+            return {"status": "error", "error": "Unsupported ack payload"}
+
+        if status not in ("queued", "error"):
+            return {"status": "error", "error": f"Unknown TTS ack status: {status}"}
+
+        if not isinstance(length, int) or length <= 0:
+            return {"status": "error", "error": "Invalid TTS ack length"}
+
+        self._last_tts_ack = {
+            "device": device,
+            "type": ack_type,
+            "status": status,
+            "len": length
+        }
+        self._last_tts_ack_time = time.time()
+
+        return {
+            "status": "success",
+            "ack": self._last_tts_ack
+        }
     
     def get_status(self) -> dict:
         """
@@ -519,6 +570,9 @@ class MQTTAPI:
         wellness_timers = self.timer_manager.get_active_timers(
             timer_type=TimerManager.TIMER_TYPE_WELLNESS
         )
+        tts_ack_age_seconds = None
+        if self._last_tts_ack_time is not None:
+            tts_ack_age_seconds = max(0.0, time.time() - self._last_tts_ack_time)
         
         return {
             "status": "ok",
@@ -540,7 +594,11 @@ class MQTTAPI:
                     for t in active_timers
                 ]
             },
-            "wellness_config": self.wellness_trigger.get_config()
+            "wellness_config": self.wellness_trigger.get_config(),
+            "tts": {
+                "last_ack": self._last_tts_ack,
+                "last_ack_age_seconds": tts_ack_age_seconds
+            }
         }
     
     def _validate_sensor_data(self, data: dict) -> bool:

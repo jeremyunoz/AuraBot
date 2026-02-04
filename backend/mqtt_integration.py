@@ -153,6 +153,22 @@ class MQTTIntegration:
                 elif msg.topic == "aurabot/tts/speak":
                     # Backend publishes here for ESP32; ignore when we receive our own or echoes (no action)
                     pass
+                elif msg.topic == "aurabot/tts/ack":
+                    response = self.mqtt_api.handle_tts_ack(data)
+                    level = "INFO" if response.get("status") == "success" else "WARNING"
+                    self.mqtt_api.logger.log_mqtt(
+                        f"TTS ack processed: {response.get('status', 'unknown')}",
+                        level,
+                        metadata={"topic": msg.topic, "status": response.get("status")}
+                    )
+                    if response.get("status") == "success":
+                        ack = response.get("ack", {})
+                        if ack.get("status") == "error":
+                            self.mqtt_api.logger.log_mqtt(
+                                "ESP32 reported TTS error",
+                                "ERROR",
+                                metadata={"len": ack.get("len")}
+                            )
                 else:
                     self.mqtt_api.logger.log_mqtt(f"Unhandled topic: {msg.topic}", "WARNING")
                     
