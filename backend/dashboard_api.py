@@ -150,11 +150,11 @@ def create_app(aurabot: Optional[Any] = None) -> FastAPI:
     @app.get("/api/config")
     def api_config(request: Request):
         bot = _get_aurabot(request)
-        cfg = {"wellness": {}, "debounce": {}, "presence_threshold_cm": None}
+        cfg = {"wellness": {}, "debounce": {}, "presence_fusion": False}
         if bot.mqtt_api:
             cfg["wellness"] = bot.mqtt_api.wellness_trigger.get_config()
             cfg["debounce"] = bot.mqtt_api.get_debounce_config()
-            cfg["presence_threshold_cm"] = bot.mqtt_api.get_presence_threshold()
+            cfg["presence_fusion"] = bot.mqtt_api.get_presence_fusion()
         return cfg
 
     if os.path.isdir(_DASHBOARD_DIR):

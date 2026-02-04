@@ -12,7 +12,7 @@ from wellness_timer_trigger import WellnessTimerTrigger
 from time import sleep
 from typing import Optional, Dict, List
 from mqtt_api import MQTTAPI
-from mqtt_integration import MQTTIntegration
+from mqtt_integration import MQTTIntegration, TTSWithMQTT
 from vision_integration import start_vision_integration
 from dashboard_api import run_dashboard
 from dotenv import load_dotenv
@@ -59,22 +59,25 @@ class AuraBot:
         self.greeting = greeting
         # Use AuraBotLogger for comprehensive logging with category routing
         self.logger = AuraBotLogger(log_file=log_file or LOG_FILE)
-        
-        # Initialize STT and TTS
-        self.stt = STT()    
-        self.tts_engine = TTS()
-        self.tts_engine.style()
-        
-        # Initialize TimerManager
+
+        # Initialize STT (Pi does STT; TTS is on ESP32 via MQTT)
+        self.stt = STT()
+
+        # Initialize TTS (raw engine; may wrap with TTSWithMQTT when MQTT is enabled)
+        self._tts_engine_raw = TTS()
+        self._tts_engine_raw.style()
+        self.tts_engine = self._tts_engine_raw
+
+        # Initialize TimerManager (tts_engine may be replaced with wrapper below)
         self.timer_manager = TimerManager(self.tts_engine, self.logger)
-        
+
         # Initialize ResponseHandler with TimerManager for timer command integration
         self.response_handler = ResponseHandler(custom_responses, self.timer_manager)
-        
-        # Initialize MQTT integration (optional)
+
+        # Initialize MQTT integration (optional); when enabled, TTS also publishes to aurabot/tts/speak
         self.mqtt_api: Optional[MQTTAPI] = None
         self.mqtt_integration: Optional[MQTTIntegration] = None
-        
+
         if enable_mqtt:
             try:
                 self.mqtt_api = MQTTAPI(
@@ -84,11 +87,18 @@ class AuraBot:
                     logger=self.logger
                 )
                 self.mqtt_integration = MQTTIntegration(self.mqtt_api)
+                # Pi does STT only; TTS is on ESP32. Wrap TTS so speak() publishes to aurabot/tts/speak (no local playback).
+                self.tts_engine = TTSWithMQTT(self._tts_engine_raw, self.mqtt_integration)
+                # Point all TTS users at the wrapper: conversation loop, TimerManager, MQTTAPI, WellnessTimerTrigger
+                self.timer_manager.tts_engine = self.tts_engine
+                self.mqtt_api.tts_engine = self.tts_engine
+                self.mqtt_api.wellness_trigger.tts_engine = self.tts_engine
             except Exception as e:
                 self.logger.log_error(f"Could not initialize MQTT integration: {e}")
                 self.logger.log_general("Continuing without MQTT support...", "WARNING")
         
         self._enable_vision = enable_vision
+        self._vision_stop_event = None
         self._is_running = False
     
     def start(self):
@@ -106,8 +116,12 @@ class AuraBot:
         # Start vision (camera) integration if enabled; feeds camera_confirmed into MQTT sensor API
         if self._enable_vision and self.mqtt_api:
             try:
-                start_vision_integration(self)
-                self.logger.log_general("Vision integration enabled - camera will drive presence/session", "INFO")
+                self.mqtt_api.set_presence_fusion(True)  # Require camera AND PIR to infer presence
+                self._vision_stop_event = start_vision_integration(self)
+                self.logger.log_general(
+                    "Vision integration enabled - presence requires both camera and PIR motion",
+                    "INFO",
+                )
             except Exception as e:
                 self.logger.log_error(f"Vision integration failed to start: {e}")
         
@@ -264,6 +278,15 @@ class AuraBot:
         """Clean up resources and shutdown the chatbot."""
         self._is_running = False
         
+        # Stop vision (camera) integration if enabled
+        if self._vision_stop_event:
+            try:
+                self._vision_stop_event.set()
+                # Give vision thread a moment to clean up camera resources
+                sleep(0.2)
+            except Exception as e:
+                self.logger.log_error(f"Error stopping vision integration: {e}")
+        
         # Stop wellness timer monitoring
         if self.mqtt_api and self.mqtt_api.wellness_trigger:
             try:
@@ -309,7 +332,7 @@ class AuraBot:
         except Exception as e:
             self.logger.log_error(f"Error canceling timers: {e}")
         
-        # Shutdown TTS
+        # Shutdown TTS (wrapper delegates to raw engine)
         try:
             self.tts_engine.shutdown_tts()
         except Exception as e:

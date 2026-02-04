@@ -68,7 +68,6 @@ def _send_presence_to_mqtt(aurabot: Any, person_info: dict) -> None:
     try:
         aurabot.mqtt_api.handle_sensor_data({
             "camera_confirmed": camera_confirmed,
-            "distance_cm": 0,
             "motion": 0,
         })
     except Exception as e:

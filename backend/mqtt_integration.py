@@ -11,6 +11,32 @@ from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
 
 
+class TTSWithMQTT:
+    """
+    TTS wrapper that publishes text to MQTT (aurabot/tts/speak) for the device
+    (e.g. ESP32) to speak. Pi does not play TTS locally when speaker is on ESP32.
+    """
+
+    def __init__(self, tts_engine, mqtt_integration: "MQTTIntegration"):
+        self._tts = tts_engine
+        self._mqtt = mqtt_integration
+
+    def speak(self, message: str) -> None:
+        # Only publish to MQTT; ESP32 (or other device) does the actual TTS playback
+        if self._mqtt.is_connected():
+            self._mqtt.publish_tts(message)
+        # Optional: uncomment next line to also speak on Pi (e.g. for debugging)
+        # self._tts.speak(message)
+
+    def style(self) -> None:
+        if hasattr(self._tts, "style"):
+            self._tts.style()
+
+    def shutdown_tts(self) -> None:
+        if hasattr(self._tts, "shutdown_tts"):
+            self._tts.shutdown_tts()
+
+
 class MQTTClientFactory:
     """Factory for creating and configuring MQTT clients."""
     
@@ -124,6 +150,9 @@ class MQTTIntegration:
                 elif msg.topic == "aurabot/status" or msg.topic.startswith("aurabot/status/"):
                     if "esp32" in msg.topic or (isinstance(data, dict) and "esp32" in data) or "esp32" in payload:
                         self.mqtt_api.record_esp32_message_received()
+                elif msg.topic == "aurabot/tts/speak":
+                    # Backend publishes here for ESP32; ignore when we receive our own or echoes (no action)
+                    pass
                 else:
                     self.mqtt_api.logger.log_mqtt(f"Unhandled topic: {msg.topic}", "WARNING")
                     
@@ -232,4 +261,27 @@ class MQTTIntegration:
         except Exception as e:
             self.mqtt_api.logger.log_mqtt(f"Error publishing to {topic}: {e}", "ERROR")
             return False
+
+    def publish_tts(self, text: str, qos: int = 1) -> bool:
+        """
+        Publish TTS text to aurabot/tts/speak for the device (e.g. ESP32) to speak.
+        
+        Args:
+            text: Text to speak on the device
+            qos: MQTT QoS (default 1)
+        
+        Returns:
+            True if published successfully, False otherwise
+        """
+        if not text:
+            return False
+        success = self.publish("aurabot/tts/speak", {"text": text}, qos=qos, retain=False)
+        if success:
+            preview = text[:80] + "..." if len(text) > 80 else text
+            self.mqtt_api.logger.log_mqtt(
+                "Published TTS to device (aurabot/tts/speak)",
+                "INFO",
+                metadata={"text_preview": preview}
+            )
+        return success
 

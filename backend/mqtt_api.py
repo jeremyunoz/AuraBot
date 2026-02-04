@@ -58,11 +58,15 @@ class MQTTAPI:
         )
         
         # Sensor state tracking
-        self._last_distance = None
         self._last_motion = None
         self._last_camera_confirmed = None
-        self._presence_threshold_cm = 50.0  # User considered present if distance < 50cm
         self._motion_threshold = 1.0  # Minimum motion value to consider active
+        # When True (vision enabled), presence requires BOTH camera AND PIR motion
+        self._require_pir_with_camera = False
+        # Last PIR/ESP32 state (so vision-only updates don't overwrite it)
+        self._last_esp32_motion: Optional[int] = None
+        self._last_esp32_time: Optional[float] = None
+        self._esp32_state_ttl_seconds = 30.0  # Use last PIR state for this long when fusing
         
         # Debounce configuration: require N consecutive readings before state change
         self._presence_stable_count = 2  # Need 2 consecutive "present" readings to start session
@@ -119,13 +123,14 @@ class MQTTAPI:
         {
             "motion": 0 | 1,
             "camera_confirmed": 0 | 1,  # or "camera": 0 | 1
-            "distance_cm": float,
             "ts_us": int (optional),
             "count": int (optional)
         }
         
         Flow:
-        1. Detect user presence based on camera/motion/distance
+        1. Detect user presence: when presence_fusion is on (vision enabled), require BOTH
+           camera_confirmed AND PIR motion; otherwise camera OR PIR motion. Vision-only
+           payloads (motion=0) use last ESP32 PIR state within TTL so camera and PIR are fused.
         2. Start/pause session timer accordingly
         3. Check session time and auto-create wellness timer if needed
         
@@ -137,7 +142,6 @@ class MQTTAPI:
             return {"status": "error", "error": "Invalid sensor data"}
         
         # Extract values
-        distance = float(data.get("distance_cm", 0))
         motion = self._coerce_binary(data.get("motion"))
         camera_confirmed = self._coerce_binary(
             data.get("camera_confirmed", data.get("camera"))
@@ -146,10 +150,30 @@ class MQTTAPI:
         # Update last sensor time for timeout monitoring
         self._last_sensor_time = time.time()
         
-        # 1. Calculate presence based on camera/motion/distance
+        # Detect vision-only payload (camera sends motion=0); ESP32 sends ts_us/count or motion=1
+        from_esp32 = (
+            data.get("ts_us") is not None or data.get("count") is not None or motion == 1
+        )
+        if from_esp32:
+            self._last_esp32_motion = motion
+            self._last_esp32_time = time.time()
+        
+        # Effective PIR motion for presence: use this payload if from ESP32, else last ESP32 state within TTL
+        now = time.time()
+        esp32_valid = (
+            self._last_esp32_time is not None and
+            (now - self._last_esp32_time) <= self._esp32_state_ttl_seconds
+        )
+        if from_esp32:
+            effective_motion = motion
+        elif esp32_valid:
+            effective_motion = self._last_esp32_motion if self._last_esp32_motion is not None else 0
+        else:
+            effective_motion = 0
+        
+        # 1. Calculate presence: require BOTH camera AND PIR motion
         is_present = (
-            camera_confirmed == 1 or
-            (distance < self._presence_threshold_cm and motion >= self._motion_threshold)
+            camera_confirmed == 1 and effective_motion >= self._motion_threshold
         )
         
         # Check if wellness timer is active - if so, don't resume session timer
@@ -162,10 +186,11 @@ class MQTTAPI:
         # Build response with current state
         response = {
             "status": "processed",
-            "distance_cm": distance,
             "motion": motion,
             "camera_confirmed": camera_confirmed,
             "presence": is_present,
+            "presence_fusion": self._require_pir_with_camera,
+            "effective_motion": effective_motion,
             "wellness_timer_active": wellness_timer_active,
             "debounce": {
                 "consecutive_present": self._consecutive_present_count,
@@ -203,7 +228,6 @@ class MQTTAPI:
                             f"Session started: user detected (stable for {self._consecutive_present_count} readings)",
                             "INFO",
                             metadata={
-                                "distance_cm": distance,
                                 "motion": motion,
                                 "camera_confirmed": camera_confirmed,
                                 "consecutive_present": self._consecutive_present_count
@@ -248,7 +272,6 @@ class MQTTAPI:
                             f"Session paused: user left (stable for {self._consecutive_absent_count} readings)",
                             "INFO",
                             metadata={
-                                "distance_cm": distance,
                                 "motion": motion,
                                 "camera_confirmed": camera_confirmed,
                                 "consecutive_absent": self._consecutive_absent_count
@@ -265,7 +288,6 @@ class MQTTAPI:
         response["session_time_seconds"] = current_session_time
         
         # Update last sensor readings
-        self._last_distance = distance
         self._last_motion = motion
         self._last_camera_confirmed = camera_confirmed
         
@@ -496,20 +518,13 @@ class MQTTAPI:
             return False
         
         # Check for required fields
-        if "distance_cm" not in data or "motion" not in data:
+        if "motion" not in data:
             return False
         
         if "camera_confirmed" not in data and "camera" not in data:
             return False
         
         # Validate types
-        try:
-            distance = float(data["distance_cm"])
-            if distance < 0:
-                return False
-        except (ValueError, TypeError):
-            return False
-        
         motion = self._coerce_binary(data.get("motion"))
         if motion is None:
             return False
@@ -540,24 +555,17 @@ class MQTTAPI:
                 return int(value)
         return None
     
-    def update_presence_threshold(self, threshold_cm: float):
+    def set_presence_fusion(self, require_pir_with_camera: bool) -> None:
         """
-        Update the distance threshold for presence detection.
-        
-        Args:
-            threshold_cm: New threshold in centimeters
+        Set whether presence requires BOTH camera AND PIR motion (fusion mode).
+        When True (e.g. vision enabled), user is present only if camera sees a person
+        AND PIR has seen motion within the ESP32 state TTL.
         """
-        if threshold_cm > 0:
-            self._presence_threshold_cm = threshold_cm
+        self._require_pir_with_camera = require_pir_with_camera
     
-    def get_presence_threshold(self) -> float:
-        """
-        Get current presence detection threshold.
-        
-        Returns:
-            float: Threshold in centimeters
-        """
-        return self._presence_threshold_cm
+    def get_presence_fusion(self) -> bool:
+        """Return True if presence fusion (camera + PIR) is enabled."""
+        return self._require_pir_with_camera
     
     def update_debounce_config(self, 
                                 presence_stable_count: Optional[int] = None,
