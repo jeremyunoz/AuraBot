@@ -88,9 +88,6 @@ esp_err_t tts_speak(const char *text)
     if (text == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_busy) {
-        return ESP_ERR_INVALID_STATE;
-    }
 
     s_busy = true;
     picotts_add(text, (unsigned)(strlen(text) + 1));

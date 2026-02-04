@@ -2,11 +2,75 @@
 
 #include "esp_log.h"
 #include "mqtt_client.h"
+#include <string.h>
+
+#include "cJSON.h"
+
+#if CONFIG_SPEAKER_ENABLE
+#include "tts.h"
+#endif
 
 static const char *TAG = "mqtt";
 
 static esp_mqtt_client_handle_t client = NULL;
 static bool connected = false;
+
+static bool topic_equals(const esp_mqtt_event_handle_t event, const char *topic)
+{
+    if (!event || !topic) return false;
+    size_t topic_len = strlen(topic);
+    return (event->topic_len == (int)topic_len) && (strncmp(event->topic, topic, topic_len) == 0);
+}
+
+static void handle_tts_speak(const esp_mqtt_event_handle_t event)
+{
+    if (!event || !event->data || event->data_len <= 0) return;
+
+    cJSON *root = cJSON_ParseWithLength(event->data, (size_t)event->data_len);
+    if (!root) {
+        ESP_LOGW(TAG, "TTS payload is not valid JSON");
+        return;
+    }
+
+    const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
+    if (!cJSON_IsString(text) || text->valuestring == NULL) {
+        ESP_LOGW(TAG, "TTS payload missing 'text' string");
+        cJSON_Delete(root);
+        return;
+    }
+
+    const char *msg = text->valuestring;
+    size_t msg_len = strlen(msg);
+    if (msg_len == 0) {
+        ESP_LOGW(TAG, "TTS payload has empty 'text'");
+        cJSON_Delete(root);
+        return;
+    }
+
+    ESP_LOGI(TAG, "TTS speak request len=%u", (unsigned)msg_len);
+
+    esp_err_t speak_err = ESP_ERR_NOT_SUPPORTED;
+#if CONFIG_SPEAKER_ENABLE
+    speak_err = tts_speak(msg);
+    if (speak_err != ESP_OK) {
+        ESP_LOGW(TAG, "tts_speak failed: %s", esp_err_to_name(speak_err));
+    }
+#else
+    ESP_LOGW(TAG, "TTS request received but speaker/TTS disabled in config");
+#endif
+
+    char ack[128];
+    snprintf(
+        ack,
+        sizeof(ack),
+        "{\"device\":\"esp32\",\"type\":\"tts\",\"status\":\"%s\",\"len\":%u}",
+        (speak_err == ESP_OK) ? "queued" : "error",
+        (unsigned)msg_len
+    );
+    (void)mqtt_publish("aurabot/tts/ack", ack, 1, 0);
+
+    cJSON_Delete(root);
+}
 
 /* ---------- MQTT EVENT HANDLER ---------- */
 static void mqtt_event_handler(void *arg,
@@ -24,6 +88,7 @@ static void mqtt_event_handler(void *arg,
 
         // Subscribe to your control topic here
         esp_mqtt_client_subscribe(client, "aurabot/control", 1);
+        esp_mqtt_client_subscribe(client, "aurabot/tts/speak", 1);
         mqtt_publish("aurabot/status", "{\"device\":\"esp32\",\"status\":\"online\"}", 1, 1);
         break;
 
@@ -37,7 +102,9 @@ static void mqtt_event_handler(void *arg,
         ESP_LOGI(TAG, "TOPIC=%.*s", event->topic_len, event->topic);
         ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
 
-        // TODO: parse payload and act
+        if (topic_equals(event, "aurabot/tts/speak")) {
+            handle_tts_speak(event);
+        }
         break;
 
     case MQTT_EVENT_ERROR:
