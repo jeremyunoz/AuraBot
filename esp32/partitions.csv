@@ -1,0 +1,7 @@
+# Name, Type, SubType, Offset, Size, Flags
+# App partition sized for PicoTTS (embed or partition-based). PicoTTS TA/SG below for partition-based loading.
+nvs, data, nvs, , 0x6000,
+phy_init, data, phy, , 0x1000,
+factory, app, factory, , 2500K,
+picotts_ta, data, undefined, , 640K,
+picotts_sg, data, undefined, , 820K,

@@ -1,2 +1,11 @@
+# Choice overrides first (must select desired option, not set others to n)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PICOTTS_LANGUAGE_EN_US=y
+CONFIG_PICOTTS_RESOURCE_MODE_PARTITION=y
+
+# Custom partition table: larger app (3M) for PicoTTS + TA/SG partitions
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 CONFIG_ESP_MAXIMUM_RETRY=5

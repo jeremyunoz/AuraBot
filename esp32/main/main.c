@@ -15,6 +15,7 @@
 #include "pir.h"
 #include "driver/gpio.h"
 #include "speaker.h"
+#include "tts.h"
 
 #define PIR_GPIO       GPIO_NUM_24
 #define PIR_PRESENCE_BIT  (1 << 0)
@@ -72,11 +73,6 @@ static void publisher_task(void *arg)
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "mqtt_publish failed: %s", esp_err_to_name(err));
                 }
-#if CONFIG_SPEAKER_ENABLE
-                if (speaker_is_ready()) {
-                    speaker_beep();
-                }
-#endif
             }
         }
     }
@@ -106,6 +102,13 @@ void app_main(void)
     ret = speaker_init();
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Speaker initialized");
+        ret = tts_init();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "TTS initialized");
+            tts_speak("Hello, I am Aurabot.");
+        } else {
+            ESP_LOGE(TAG, "TTS init failed: %s", esp_err_to_name(ret));
+        }
     } else {
         ESP_LOGE(TAG, "Speaker init failed: %s", esp_err_to_name(ret));
     }
