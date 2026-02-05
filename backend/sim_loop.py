@@ -41,7 +41,8 @@ class AuraBot:
                  enable_mqtt: bool = True,
                  enable_vision: bool = False,
                  wellness_threshold_seconds: Optional[int] = None,
-                 wellness_break_duration_seconds: Optional[int] = None):
+                 wellness_break_duration_seconds: Optional[int] = None,
+                 wellness_pause_timeout_seconds: Optional[int] = None):
         """
         Initialize the AuraBot chatbot.
         
@@ -55,6 +56,8 @@ class AuraBot:
                                       (None uses default from WellnessTimerTrigger)
             wellness_break_duration_seconds: Duration of wellness break timer in seconds
                                            (None uses default from WellnessTimerTrigger)
+            wellness_pause_timeout_seconds: Seconds to wait while paused before stopping session
+                                            (None uses default from WellnessTimerTrigger)
         """
         self.greeting = greeting
         # Use AuraBotLogger for comprehensive logging with category routing
@@ -84,6 +87,7 @@ class AuraBot:
                     self,
                     wellness_threshold_seconds=wellness_threshold_seconds,
                     wellness_break_duration_seconds=wellness_break_duration_seconds,
+                    wellness_pause_timeout_seconds=wellness_pause_timeout_seconds,
                     logger=self.logger
                 )
                 self.mqtt_integration = MQTTIntegration(self.mqtt_api)
@@ -357,6 +361,7 @@ def main():
     - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
     - WELLNESS_THRESHOLD_SECONDS: Sitting time threshold before wellness timer triggers
     - WELLNESS_BREAK_DURATION_SECONDS: Duration of wellness break timer
+    - WELLNESS_PAUSE_TIMEOUT_SECONDS: Seconds to wait while paused before stopping session
     """
     # Check MQTT enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
@@ -368,17 +373,21 @@ def main():
     
     env_duration = os.getenv("WELLNESS_BREAK_DURATION_SECONDS")
     break_duration = int(env_duration) if env_duration else None
+
+    env_pause_timeout = os.getenv("WELLNESS_PAUSE_TIMEOUT_SECONDS")
+    pause_timeout = int(env_pause_timeout) if env_pause_timeout else None
     
     # Create AuraBot instance
     bot = AuraBot(
         enable_mqtt=enable_mqtt,
         enable_vision=enable_vision,
         wellness_threshold_seconds=wellness_threshold,
-        wellness_break_duration_seconds=break_duration
+        wellness_break_duration_seconds=break_duration,
+        wellness_pause_timeout_seconds=pause_timeout
     )
     
     # Log configuration if set
-    if enable_mqtt and (wellness_threshold is not None or break_duration is not None):
+    if enable_mqtt and (wellness_threshold is not None or break_duration is not None or pause_timeout is not None):
         config_msg = "Wellness timer configuration:"
         metadata = {}
         if wellness_threshold is not None:
@@ -390,6 +399,10 @@ def main():
             minutes = break_duration // 60
             config_msg += f" Break duration: {break_duration}s ({minutes}m)"
             metadata["break_duration_seconds"] = break_duration
+        if pause_timeout is not None:
+            minutes = pause_timeout // 60
+            config_msg += f" Pause timeout: {pause_timeout}s ({minutes}m)"
+            metadata["pause_timeout_seconds"] = pause_timeout
         bot.logger.log_wellness(config_msg, "INFO", metadata=metadata if metadata else None)
     
     if enable_vision:

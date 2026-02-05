@@ -23,6 +23,7 @@ class MQTTAPI:
                  aurabot,
                  wellness_threshold_seconds: Optional[int] = None,
                  wellness_break_duration_seconds: Optional[int] = None,
+                 wellness_pause_timeout_seconds: Optional[int] = None,
                  logger: Optional[AuraBotLogger] = None):
         """
         Initialize the MQTT API.
@@ -33,6 +34,8 @@ class MQTTAPI:
                                        (None uses default from WellnessTimerTrigger)
             wellness_break_duration_seconds: Duration of wellness break timer in seconds
                                            (None uses default from WellnessTimerTrigger)
+            wellness_pause_timeout_seconds: Seconds to wait while paused before stopping session
+                                            (None uses default from WellnessTimerTrigger)
             logger: Optional AuraBotLogger instance (defaults to aurabot.logger if available)
         """
         self.aurabot = aurabot
@@ -47,7 +50,9 @@ class MQTTAPI:
             tts_engine=self.tts_engine,
             sitting_threshold_seconds=wellness_threshold_seconds,
             break_duration_seconds=wellness_break_duration_seconds,
+            pause_timeout_seconds=wellness_pause_timeout_seconds,
             on_wellness_timer_created=self._clear_debounce_counters,
+            on_pause_timeout=self._handle_wellness_pause_timeout,
             logger=self.logger
         )
         
@@ -122,6 +127,30 @@ class MQTTAPI:
             self._consecutive_present_count = 0
             self._consecutive_absent_count = 0
         return result
+
+    def _handle_wellness_pause_timeout(self) -> None:
+        """
+        Stop session when wellness pause timeout expires and request sleep mode.
+        """
+        session_state = self.aurabot.get_sitting_timer_state()
+        if session_state == "idle":
+            return
+        session_data = self._handle_stop_session()
+        if self.logger:
+            self.logger.log_wellness(
+                "Session stopped due to wellness pause timeout; entering sleep mode",
+                "WARNING",
+                metadata={
+                    "session_state_before": session_state,
+                    "session_seconds": session_data.get("total_seconds") if session_data else None
+                }
+            )
+        if hasattr(self.aurabot, "enter_sleep_mode"):
+            try:
+                self.aurabot.enter_sleep_mode()
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(f"Error entering sleep mode: {e}")
     
     def handle_sensor_data(self, data: dict) -> dict:
         """

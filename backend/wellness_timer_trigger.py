@@ -26,6 +26,7 @@ class WellnessTimerTrigger:
     DEFAULT_BREAK_DURATION_SECONDS = 10 * 60  # 10 minutes
     DEFAULT_BREAK_TIMER_NAME = "Wellness Break"
     DEFAULT_CHECK_INTERVAL_SECONDS = 10  # Check every 10 seconds
+    DEFAULT_PAUSE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
     
     def __init__(self, 
                  timer_manager: TimerManager,
@@ -34,7 +35,9 @@ class WellnessTimerTrigger:
                  break_duration_seconds: Optional[int] = None,
                  break_timer_name: Optional[str] = None,
                  check_interval_seconds: int = DEFAULT_CHECK_INTERVAL_SECONDS,
+                 pause_timeout_seconds: Optional[int] = None,
                  on_wellness_timer_created: Optional[Callable] = None,
+                 on_pause_timeout: Optional[Callable] = None,
                  logger: Optional[AuraBotLogger] = None):
         """
         Initialize the WellnessTimerTrigger.
@@ -46,7 +49,9 @@ class WellnessTimerTrigger:
             break_duration_seconds: Duration of break timer (default: 10 minutes)
             break_timer_name: Name for wellness break timers (default: "Wellness Break")
             check_interval_seconds: How often to check session time in background (default: 10 seconds)
+            pause_timeout_seconds: Seconds to wait while paused before stopping session (default: 30 minutes)
             on_wellness_timer_created: Optional callback called when wellness timer is created
+            on_pause_timeout: Optional callback called when pause timeout expires
             logger: Optional AuraBotLogger instance for logging
         """
         self.timer_manager = timer_manager
@@ -64,17 +69,29 @@ class WellnessTimerTrigger:
             break_timer_name or self.DEFAULT_BREAK_TIMER_NAME
         )
         self.check_interval_seconds = check_interval_seconds
+        self.pause_timeout_seconds = (
+            pause_timeout_seconds
+            if pause_timeout_seconds is not None
+            else self.DEFAULT_PAUSE_TIMEOUT_SECONDS
+        )
+        if self.pause_timeout_seconds is not None and self.pause_timeout_seconds <= 0:
+            self.pause_timeout_seconds = None
         
         # Background monitoring
         self._monitoring_thread: Optional[threading.Thread] = None
         self._stop_monitoring = threading.Event()
         self._pause_monitoring = threading.Event()  # Pause state for when user leaves
         self._session_time_getter: Optional[Callable[[], float]] = None
+        self._pause_started_at: Optional[float] = None
+        self._pause_timeout_triggered = False
+        self._pending_wellness_resume_timeout = False
+        self._wellness_break_end_time: Optional[float] = None
         
         # Track last wellness timer trigger to prevent continuous creation
         # This tracks the session time at which we last triggered a wellness timer
         self._last_trigger_session_time: Optional[float] = None
         self._trigger_lock = threading.Lock()
+        self._on_pause_timeout = on_pause_timeout
     
     def check_and_trigger_wellness_timer(self, session_time_seconds: float) -> Optional[str]:
         """
@@ -134,6 +151,10 @@ class WellnessTimerTrigger:
                     self.timer_manager.session_timer.pause()
                     if self.logger:
                         self.logger.log_wellness("Session timer paused for wellness break", "INFO")
+                    self._pending_wellness_resume_timeout = True
+                    self._wellness_break_end_time = time.time() + self.break_duration_seconds
+                    self._pause_started_at = None
+                    self._pause_timeout_triggered = False
                 
                 # Notify callback (e.g., to clear debounce counters)
                 if self.on_wellness_timer_created:
@@ -202,6 +223,10 @@ class WellnessTimerTrigger:
         """
         with self._trigger_lock:
             self._last_trigger_session_time = None
+        self._pending_wellness_resume_timeout = False
+        self._wellness_break_end_time = None
+        self._pause_started_at = None
+        self._pause_timeout_triggered = False
     
     def get_config(self) -> dict:
         """
@@ -213,7 +238,8 @@ class WellnessTimerTrigger:
         return {
             "sitting_threshold_seconds": self.sitting_threshold_seconds,
             "break_duration_seconds": self.break_duration_seconds,
-            "break_timer_name": self.break_timer_name
+            "break_timer_name": self.break_timer_name,
+            "pause_timeout_seconds": self.pause_timeout_seconds
         }
     
     def start_monitoring(self, session_time_getter: Callable[[], float]):
@@ -236,11 +262,32 @@ class WellnessTimerTrigger:
         def monitor_loop():
             """Background thread that periodically checks session time."""
             while not self._stop_monitoring.is_set():
+                now = time.time()
                 # Check if monitoring is paused (user left area)
                 if self._pause_monitoring.is_set():
+                    if self._pause_started_at is None:
+                        self._pause_started_at = now
+                    self._check_pause_timeout(now)
                     # Wait while paused, but check stop event periodically
                     self._stop_monitoring.wait(timeout=1.0)
                     continue
+                
+                # If a wellness break ended but session never resumed, apply pause timeout
+                if self._pending_wellness_resume_timeout:
+                    if self._wellness_break_end_time is not None and now >= self._wellness_break_end_time:
+                        active_wellness_timers = self.timer_manager.get_active_timers(
+                            timer_type=TimerManager.TIMER_TYPE_WELLNESS
+                        )
+                        if not active_wellness_timers:
+                            session_state = self.timer_manager.session_timer.get_state()
+                            if session_state == "paused":
+                                if self._pause_started_at is None:
+                                    self._pause_started_at = now
+                                    self._pause_timeout_triggered = False
+                                self._check_pause_timeout(now)
+                            else:
+                                self._pending_wellness_resume_timeout = False
+                                self._wellness_break_end_time = None
                 
                 try:
                     if self._session_time_getter:
@@ -259,6 +306,29 @@ class WellnessTimerTrigger:
         
         self._monitoring_thread = threading.Thread(target=monitor_loop, daemon=True)
         self._monitoring_thread.start()
+
+    def _check_pause_timeout(self, now: float) -> None:
+        if (self.pause_timeout_seconds is None or
+            self._pause_started_at is None or
+            self._pause_timeout_triggered):
+            return
+        elapsed = now - self._pause_started_at
+        if elapsed >= self.pause_timeout_seconds:
+            self._pause_timeout_triggered = True
+            if self.logger:
+                self.logger.log_wellness(
+                    "Wellness pause timeout reached - stopping session",
+                    "WARNING",
+                    metadata={"timeout_seconds": self.pause_timeout_seconds}
+                )
+            if self._on_pause_timeout:
+                try:
+                    self._on_pause_timeout()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.log_error(f"Error in pause timeout callback: {e}")
+                    else:
+                        print(f"Error in pause timeout callback: {e}")
     
     def pause_monitoring(self):
         """
@@ -268,6 +338,7 @@ class WellnessTimerTrigger:
         will preserve trigger state. Call resume_monitoring() when user returns.
         """
         self._pause_monitoring.set()
+        self._pause_timeout_triggered = False
     
     def resume_monitoring(self):
         """
@@ -277,6 +348,10 @@ class WellnessTimerTrigger:
         based on the preserved trigger state.
         """
         self._pause_monitoring.clear()
+        self._pause_started_at = None
+        self._pause_timeout_triggered = False
+        self._pending_wellness_resume_timeout = False
+        self._wellness_break_end_time = None
     
     def is_paused(self) -> bool:
         """
@@ -292,6 +367,10 @@ class WellnessTimerTrigger:
         if self._monitoring_thread and self._monitoring_thread.is_alive():
             self._stop_monitoring.set()
             self._pause_monitoring.clear()  # Clear pause state on stop
+            self._pause_started_at = None
+            self._pause_timeout_triggered = False
+            self._pending_wellness_resume_timeout = False
+            self._wellness_break_end_time = None
             self._monitoring_thread.join(timeout=2.0)
             self._monitoring_thread = None
     
@@ -307,7 +386,8 @@ class WellnessTimerTrigger:
     def update_config(self,
                       sitting_threshold_seconds: Optional[int] = None,
                       break_duration_seconds: Optional[int] = None,
-                      break_timer_name: Optional[str] = None):
+                      break_timer_name: Optional[str] = None,
+                      pause_timeout_seconds: Optional[int] = None):
         """
         Update configuration values.
         
@@ -315,6 +395,7 @@ class WellnessTimerTrigger:
             sitting_threshold_seconds: New threshold (None to keep current)
             break_duration_seconds: New break duration (None to keep current)
             break_timer_name: New timer name (None to keep current)
+            pause_timeout_seconds: New pause timeout (None to keep current)
         """
         if sitting_threshold_seconds is not None:
             self.sitting_threshold_seconds = sitting_threshold_seconds
@@ -322,4 +403,8 @@ class WellnessTimerTrigger:
             self.break_duration_seconds = break_duration_seconds
         if break_timer_name is not None:
             self.break_timer_name = break_timer_name
+        if pause_timeout_seconds is not None:
+            self.pause_timeout_seconds = pause_timeout_seconds
+            if self.pause_timeout_seconds <= 0:
+                self.pause_timeout_seconds = None
 
