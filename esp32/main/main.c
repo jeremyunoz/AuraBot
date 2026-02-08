@@ -6,72 +6,197 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
-
+#include "freertos/queue.h"
 #include "freertos/event_groups.h"
-#include "wifi_connect.h"
-#include "mqtt.h"
-#include "esp_timer.h"
-#include "pir.h"
-#include "driver/gpio.h"
+
 #include "speaker.h"
 #include "tts.h"
+#include "wakeword.h"
+#include "wifi_connect.h"
+#include "mqtt.h"
+#include "pir.h"
+#include "driver/gpio.h"
 
-#define PIR_GPIO       GPIO_NUM_24
-#define PIR_PRESENCE_BIT  (1 << 0)
-
-static pir_t pir = {
-    .pin = PIR_GPIO,
-};
+#include "system_events.h"
 
 static const char *TAG = "main";
 
-static void publisher_task(void *arg)
+typedef enum {
+    SYS_STATE_IDLE = 0,
+    SYS_STATE_WAKING,
+    SYS_STATE_ACTIVE,
+    SYS_STATE_SLEEPING
+} sys_state_t;
+
+#define STATE_TASK_STACK_SIZE  4096
+#define PIR_TASK_STACK_SIZE    4096
+#define EVT_QUEUE_LEN          10
+#define PIR_EVENT_BIT          BIT0
+
+static QueueHandle_t s_evt_queue = NULL;
+static EventGroupHandle_t s_pir_evt = NULL;
+static sys_state_t s_state = SYS_STATE_IDLE;
+static bool s_pir_configured = false;
+
+static const char *state_to_str(sys_state_t state)
+{
+    switch (state) {
+    case SYS_STATE_IDLE:
+        return "IDLE";
+    case SYS_STATE_WAKING:
+        return "WAKING";
+    case SYS_STATE_ACTIVE:
+        return "ACTIVE";
+    case SYS_STATE_SLEEPING:
+        return "SLEEPING";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static void publish_state(sys_state_t state)
+{
+    char msg[128];
+    snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"state\":\"%s\"}", state_to_str(state));
+    (void)mqtt_publish("aurabot/status", msg, 1, 1);
+}
+
+static void publish_pir_status(const char *status)
+{
+    char msg[128];
+    snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"pir\":\"%s\"}", status);
+    (void)mqtt_publish("aurabot/status", msg, 1, 0);
+}
+
+static void set_state(sys_state_t state)
+{
+    s_state = state;
+    publish_state(state);
+    ESP_LOGI(TAG, "State -> %s", state_to_str(state));
+}
+
+static void pir_task(void *arg)
 {
     (void)arg;
-
-    char payload[96];
-    EventGroupHandle_t event_group = xEventGroupCreate();
-    if (event_group == NULL) {
-        ESP_LOGE(TAG, "Failed to create PIR event group");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // initialize the PIR
-    esp_err_t ret = pir_int_interrupt(&pir, event_group, PIR_PRESENCE_BIT);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "PIR initialization failed: %s", esp_err_to_name(ret));
-        vTaskDelete(NULL);
-        return;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(20000)); // wait for the PIR to warm up
-
-    // publish MQTT message every time the PIR is triggered
     while (1) {
-        EventBits_t bits = xEventGroupWaitBits(
-            event_group,
-            PIR_PRESENCE_BIT,
-            pdTRUE, pdFALSE, portMAX_DELAY
+        if (!s_pir_evt) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        xEventGroupWaitBits(
+            s_pir_evt,
+            PIR_EVENT_BIT,
+            pdTRUE,
+            pdFALSE,
+            portMAX_DELAY
         );
 
-        if (bits & PIR_PRESENCE_BIT) {
-            int detected_level = gpio_get_level(pir.pin);
-            if (detected_level == 1) {
-                uint32_t count = pir_get_count();
-                int motion = 1;
-                long long ts_us = (long long)esp_timer_get_time();
+        if (s_state == SYS_STATE_ACTIVE && mqtt_is_connected()) {
+            char msg[128];
+            uint32_t count = pir_get_count();
+            snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"pir\":\"motion\",\"count\":%u}", (unsigned)count);
+            (void)mqtt_publish("aurabot/status", msg, 0, 0);
+        }
+    }
+}
 
-                snprintf(payload, sizeof(payload),
-                         "{\"motion\":%d,\"ts_us\":%lld,\"count\":%lu}",
-                         motion, ts_us, (unsigned long)count);
+static void enter_sleeping(void)
+{
+    set_state(SYS_STATE_SLEEPING);
 
-                esp_err_t err = mqtt_publish("aurabot/sensors", payload, 1, 0);
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG, "mqtt_publish failed: %s", esp_err_to_name(err));
-                }
+    mqtt_stop();
+    wifi_disconnect_sta();
+
+    s_state = SYS_STATE_IDLE;
+    ESP_LOGI(TAG, "State -> %s", state_to_str(s_state));
+}
+
+static void enter_waking(void)
+{
+    set_state(SYS_STATE_WAKING);
+
+    ESP_LOGI(TAG, "Starting WiFi station");
+    wifi_sta_cfg_t cfg = {
+        .ssid = CONFIG_ESP_WIFI_SSID,
+        .password = CONFIG_ESP_WIFI_PASSWORD,
+        .max_retry = CONFIG_ESP_MAXIMUM_RETRY,
+    };
+
+    if (wifi_connect_sta(&cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi connect failed");
+        enter_sleeping();
+        return;
+    }
+
+    if (mqtt_start() != ESP_OK) {
+        ESP_LOGE(TAG, "MQTT start failed");
+        enter_sleeping();
+        return;
+    }
+
+    int wait_ms = 0;
+    while (!mqtt_is_connected() && wait_ms < 10000) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        wait_ms += 200;
+    }
+    if (!mqtt_is_connected()) {
+        ESP_LOGE(TAG, "MQTT connect timeout");
+        enter_sleeping();
+        return;
+    }
+
+    (void)mqtt_publish(
+        "aurabot/status",
+        "{\"src\":\"esp32\",\"state\":\"WAKING\",\"wifi\":\"up\",\"mqtt\":\"up\",\"pir\":\"warming\"}",
+        1,
+        1
+    );
+
+    if (!s_pir_evt) {
+        s_pir_evt = xEventGroupCreate();
+    }
+    if (s_pir_evt && !s_pir_configured) {
+        pir_t pir = { .pin = (gpio_num_t)CONFIG_PIR_GPIO };
+        if (pir_int_interrupt(&pir, s_pir_evt, PIR_EVENT_BIT) == ESP_OK) {
+            s_pir_configured = true;
+        }
+    }
+
+    publish_pir_status("warming");
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS));
+    publish_pir_status("warm");
+
+    set_state(SYS_STATE_ACTIVE);
+}
+
+static void state_task(void *arg)
+{
+    (void)arg;
+    sys_event_t evt;
+
+    while (1) {
+        if (xQueueReceive(s_evt_queue, &evt, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        switch (s_state) {
+        case SYS_STATE_IDLE:
+            if (evt.id == SYS_EVT_WAKE_DETECTED || evt.id == SYS_EVT_FORCE_WAKE) {
+                enter_waking();
             }
+            break;
+
+        case SYS_STATE_ACTIVE:
+            if (evt.id == SYS_EVT_SESSION_END) {
+                enter_sleeping();
+            }
+            break;
+
+        case SYS_STATE_WAKING:
+        case SYS_STATE_SLEEPING:
+        default:
+            break;
         }
     }
 }
@@ -85,17 +210,7 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    ESP_LOGI(TAG, "Starting WiFi station");
-
-    wifi_sta_cfg_t cfg = {
-        .ssid = CONFIG_ESP_WIFI_SSID,
-        .password = CONFIG_ESP_WIFI_PASSWORD,
-        .max_retry = CONFIG_ESP_MAXIMUM_RETRY,
-    };
-
-    ESP_ERROR_CHECK(wifi_connect_sta(&cfg));
-
-    // initialize the speaker
+    /* Initialize speaker (also sets up I2S RX for mic input) */
 #if CONFIG_SPEAKER_ENABLE
     ret = speaker_init();
     if (ret == ESP_OK) {
@@ -112,7 +227,30 @@ void app_main(void)
     }
 #endif
 
-    xTaskCreate(publisher_task, "publisher_task", 4096, NULL, 5, NULL);
+    s_evt_queue = xQueueCreate(EVT_QUEUE_LEN, sizeof(sys_event_t));
+    if (!s_evt_queue) {
+        ESP_LOGE(TAG, "Failed to create event queue");
+        return;
+    }
+    wakeword_set_event_queue(s_evt_queue);
+    mqtt_set_event_queue(s_evt_queue);
+
+    s_pir_evt = xEventGroupCreate();
+    if (!s_pir_evt) {
+        ESP_LOGW(TAG, "Failed to create PIR event group");
+    } else {
+        xTaskCreate(pir_task, "pir_task", PIR_TASK_STACK_SIZE, NULL, 5, NULL);
+    }
+
+    /* Start continuous wake-word detection */
+    ret = wakeword_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Wake word start failed: %s", esp_err_to_name(ret));
+    }
+
+    set_state(SYS_STATE_IDLE);
+
+    xTaskCreate(state_task, "state_task", STATE_TASK_STACK_SIZE, NULL, 6, NULL);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
