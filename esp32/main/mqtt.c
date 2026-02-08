@@ -6,6 +6,8 @@
 
 #include "cJSON.h"
 
+#include "system_events.h"
+
 #if CONFIG_SPEAKER_ENABLE
 #include "tts.h"
 #endif
@@ -14,6 +16,19 @@ static const char *TAG = "mqtt";
 
 static esp_mqtt_client_handle_t client = NULL;
 static bool connected = false;
+static QueueHandle_t s_evt_queue = NULL;
+
+void mqtt_set_event_queue(QueueHandle_t queue)
+{
+    s_evt_queue = queue;
+}
+
+static void mqtt_post_event(sys_event_id_t id)
+{
+    if (!s_evt_queue) return;
+    sys_event_t evt = { .id = id };
+    (void)xQueueSend(s_evt_queue, &evt, 0);
+}
 
 static bool topic_equals(const esp_mqtt_event_handle_t event, const char *topic)
 {
@@ -72,6 +87,36 @@ static void handle_tts_speak(const esp_mqtt_event_handle_t event)
     cJSON_Delete(root);
 }
 
+static void handle_control_command(const esp_mqtt_event_handle_t event)
+{
+    if (!event || !event->data || event->data_len <= 0) return;
+
+    cJSON *root = cJSON_ParseWithLength(event->data, (size_t)event->data_len);
+    if (!root) {
+        ESP_LOGW(TAG, "Control payload is not valid JSON");
+        return;
+    }
+
+    const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(root, "cmd");
+    if (!cJSON_IsString(cmd) || cmd->valuestring == NULL) {
+        ESP_LOGW(TAG, "Control payload missing 'cmd' string");
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (strcmp(cmd->valuestring, "wake_ready") == 0) {
+        mqtt_post_event(SYS_EVT_PI5_READY);
+    } else if (strcmp(cmd->valuestring, "sleep") == 0) {
+        mqtt_post_event(SYS_EVT_SESSION_END);
+    } else if (strcmp(cmd->valuestring, "reconnect") == 0) {
+        mqtt_post_event(SYS_EVT_FORCE_WAKE);
+    } else {
+        ESP_LOGW(TAG, "Unknown control cmd: %s", cmd->valuestring);
+    }
+
+    cJSON_Delete(root);
+}
+
 /* ---------- MQTT EVENT HANDLER ---------- */
 static void mqtt_event_handler(void *arg,
                                esp_event_base_t event_base,
@@ -89,12 +134,13 @@ static void mqtt_event_handler(void *arg,
         // Subscribe to your control topic here
         esp_mqtt_client_subscribe(client, "aurabot/control", 1);
         esp_mqtt_client_subscribe(client, "aurabot/tts/speak", 1);
-        mqtt_publish("aurabot/status", "{\"device\":\"esp32\",\"status\":\"online\"}", 1, 1);
+        mqtt_post_event(SYS_EVT_MQTT_UP);
         break;
 
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT disconnected");
         connected = false;
+        mqtt_post_event(SYS_EVT_MQTT_FAIL);
         break;
 
     case MQTT_EVENT_DATA:
@@ -104,6 +150,8 @@ static void mqtt_event_handler(void *arg,
 
         if (topic_equals(event, "aurabot/tts/speak")) {
             handle_tts_speak(event);
+        } else if (topic_equals(event, "aurabot/control")) {
+            handle_control_command(event);
         }
         break;
 
