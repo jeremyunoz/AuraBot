@@ -25,6 +25,9 @@
 #include "esp_afe_sr_models.h"
 #include "esp_wn_iface.h"
 #include "esp_wn_models.h"
+#include "freertos/queue.h"
+
+#include "system_events.h"
 
 static const char *TAG = "wakeword";
 
@@ -39,6 +42,20 @@ typedef struct {
     esp_afe_sr_data_t        *afe_data;
     i2s_chan_handle_t          rx_handle;
 } wakeword_ctx_t;
+
+static QueueHandle_t s_evt_queue = NULL;
+
+void wakeword_set_event_queue(QueueHandle_t queue)
+{
+    s_evt_queue = queue;
+}
+
+static void wakeword_post_event(sys_event_id_t id)
+{
+    if (!s_evt_queue) return;
+    sys_event_t evt = { .id = id };
+    (void)xQueueSend(s_evt_queue, &evt, 0);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Feed task – mic → AFE                                              */
@@ -97,15 +114,7 @@ static void fetch_task(void *arg)
             ESP_LOGI(TAG, "*** Wake word detected (index=%d) ***",
                      res->wake_word_index);
 
-            /* TODO: Beep disabled while testing continuous detection.
-             * speaker_beep() reconfigures the shared I2S bus which may
-             * corrupt the RX (mic) data path. Re-enable once isolated.
-             *
-             * if (speaker_is_ready()) {
-             *     speaker_beep();
-             * }
-             * afe->reset_buffer(afe_data);
-             */
+            wakeword_post_event(SYS_EVT_WAKE_DETECTED);
 
             /* Re-arm WakeNet so it keeps listening continuously */
             int wn_ret = afe->enable_wakenet(afe_data);
