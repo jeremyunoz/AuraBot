@@ -5,3 +5,4 @@ phy_init, data, phy, , 0x1000,
 factory, app, factory, , 2500K,
 picotts_ta, data, undefined, , 640K,
 picotts_sg, data, undefined, , 820K,
+model, data, , , 600k

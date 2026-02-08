@@ -51,7 +51,7 @@ static bool s_i2c_installed;
 #endif
 
 static i2s_chan_handle_t s_tx_handle;
-/* RX not used (output-only); pass NULL to codec so it never disables RX */
+static i2s_chan_handle_t s_rx_handle;  /* RX channel for mic/ADC input (shared I2S bus) */
 
 static const audio_codec_data_if_t *s_data_if;
 static const audio_codec_ctrl_if_t *s_ctrl_if;
@@ -126,8 +126,8 @@ static esp_err_t i2s_init(void)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
 
-    /* TX only (output-only): NULL for RX so codec layer never disables RX */
-    esp_err_t ret = i2s_new_channel(&chan_cfg, &s_tx_handle, NULL);
+    /* Create both TX (speaker) and RX (mic/ADC) on the same I2S bus */
+    esp_err_t ret = i2s_new_channel(&chan_cfg, &s_tx_handle, &s_rx_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2S new channel failed: %s", esp_err_to_name(ret));
         return ret;
@@ -149,15 +149,39 @@ static esp_err_t i2s_init(void)
 
     ret = i2s_channel_init_std_mode(s_tx_handle, &std_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2S std init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "I2S TX std init failed: %s", esp_err_to_name(ret));
         i2s_del_channel(s_tx_handle);
+        i2s_del_channel(s_rx_handle);
+        return ret;
+    }
+
+    /* RX uses the same bus/clock pins; override slot to mono left for mic input */
+    i2s_std_config_t rx_cfg = std_cfg;
+    rx_cfg.slot_cfg = (i2s_std_slot_config_t)I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(16, I2S_SLOT_MODE_MONO);
+    rx_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+
+    ret = i2s_channel_init_std_mode(s_rx_handle, &rx_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S RX std init failed: %s", esp_err_to_name(ret));
+        i2s_del_channel(s_tx_handle);
+        i2s_del_channel(s_rx_handle);
         return ret;
     }
 
     ret = i2s_channel_enable(s_tx_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2S enable failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "I2S TX enable failed: %s", esp_err_to_name(ret));
         i2s_del_channel(s_tx_handle);
+        i2s_del_channel(s_rx_handle);
+        return ret;
+    }
+
+    ret = i2s_channel_enable(s_rx_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S RX enable failed: %s", esp_err_to_name(ret));
+        i2s_channel_disable(s_tx_handle);
+        i2s_del_channel(s_tx_handle);
+        i2s_del_channel(s_rx_handle);
         return ret;
     }
 
@@ -166,6 +190,11 @@ static esp_err_t i2s_init(void)
 
 static void i2s_deinit(void)
 {
+    if (s_rx_handle) {
+        i2s_channel_disable(s_rx_handle);
+        i2s_del_channel(s_rx_handle);
+        s_rx_handle = NULL;
+    }
     if (s_tx_handle) {
         i2s_channel_disable(s_tx_handle);
         i2s_del_channel(s_tx_handle);
@@ -369,11 +398,20 @@ esp_err_t speaker_close(void)
 
     esp_codec_dev_close(s_codec_dev);
     s_opened = false;
-    /* Codec layer disables TX on close. Next open's set_fmt disables TX before
-     * reconfig; the driver errors if we disable an already-disabled channel.
-     * Re-enable TX here so the next speaker_open() path works. */
+    /* Codec layer may disable I2S channels on close. Re-enable both TX and RX
+     * so the next speaker_open() works and the mic feed task keeps running.
+     * Ignore ESP_ERR_INVALID_STATE if already enabled. */
     if (s_tx_handle) {
-        i2s_channel_enable(s_tx_handle);
+        esp_err_t e = i2s_channel_enable(s_tx_handle);
+        if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "TX re-enable failed: %s", esp_err_to_name(e));
+        }
+    }
+    if (s_rx_handle) {
+        esp_err_t e = i2s_channel_enable(s_rx_handle);
+        if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "RX re-enable failed: %s", esp_err_to_name(e));
+        }
     }
     return ESP_OK;
 }
@@ -484,6 +522,11 @@ esp_err_t speaker_beep(void)
     return ESP_OK;
 }
 
+i2s_chan_handle_t speaker_get_rx_handle(void)
+{
+    return s_rx_handle;
+}
+
 #else /* !CONFIG_SPEAKER_ENABLE - stub implementation */
 
 esp_err_t speaker_init(void) { return ESP_ERR_NOT_SUPPORTED; }
@@ -495,5 +538,6 @@ esp_err_t speaker_open(int sr, int ch) { (void)sr; (void)ch; return ESP_ERR_NOT_
 esp_err_t speaker_close(void) { return ESP_OK; }
 esp_err_t speaker_write(const void *d, size_t len) { (void)d; (void)len; return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t speaker_beep(void) { return ESP_ERR_NOT_SUPPORTED; }
+i2s_chan_handle_t speaker_get_rx_handle(void) { return NULL; }
 
 #endif

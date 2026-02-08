@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "driver/i2s_std.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,6 +106,17 @@ esp_err_t speaker_write(const void *data, size_t len);
  * @return ESP_OK on success
  */
 esp_err_t speaker_beep(void);
+
+/**
+ * @brief Get the I2S RX channel handle (mic/ADC input).
+ *
+ * The RX channel shares the same I2S bus as the TX (speaker) channel.
+ * Available after speaker_init(). Returns NULL if not initialized or
+ * CONFIG_SPEAKER_ENABLE is off.
+ *
+ * @return I2S RX channel handle, or NULL
+ */
+i2s_chan_handle_t speaker_get_rx_handle(void);
 
 #ifdef __cplusplus
 }
