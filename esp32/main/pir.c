@@ -133,3 +133,9 @@ uint32_t pir_get_count(void)
     return s_pir_count;
 }
 
+/* Reset PIR trigger count to zero */
+void pir_reset_count(void)
+{
+    s_pir_count = 0;
+}
+

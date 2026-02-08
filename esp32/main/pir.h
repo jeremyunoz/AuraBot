@@ -30,3 +30,6 @@ esp_err_t pir_int_interrupt(const pir_t *pir, EventGroupHandle_t event_group, Ev
 /* Get current PIR trigger count */
 uint32_t pir_get_count(void);
 
+/* Reset PIR trigger count to zero */
+void pir_reset_count(void);
+
