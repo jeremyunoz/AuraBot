@@ -65,7 +65,7 @@ static void publish_pir_status(const char *status)
 {
     char msg[128];
     snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"pir\":\"%s\"}", status);
-    (void)mqtt_publish("aurabot/status", msg, 1, 0);
+    (void)mqtt_publish("aurabot/sensors", msg, 1, 0);
 }
 
 static void set_state(sys_state_t state)
@@ -95,8 +95,8 @@ static void pir_task(void *arg)
         if (s_state == SYS_STATE_ACTIVE && mqtt_is_connected()) {
             char msg[128];
             uint32_t count = pir_get_count();
-            snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"pir\":\"motion\",\"count\":%u}", (unsigned)count);
-            (void)mqtt_publish("aurabot/status", msg, 0, 0);
+            snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"motion\":1,\"count\":%u}", (unsigned)count);
+            (void)mqtt_publish("aurabot/sensors", msg, 1, 0);
         }
     }
 }
@@ -163,8 +163,8 @@ static void enter_waking(void)
         }
     }
 
-    publish_pir_status("warming");
     vTaskDelay(pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS));
+    pir_reset_count();
     publish_pir_status("warm");
 
     set_state(SYS_STATE_ACTIVE);
