@@ -16,6 +16,9 @@ typedef struct {
    Returns ESP_OK on success, ESP_FAIL on failure. */
 esp_err_t wifi_connect_sta(const wifi_sta_cfg_t *cfg);
 
+/* Disconnects from WiFi and stops the station. */
+void wifi_disconnect_sta(void);
+
 #ifdef __cplusplus
 }
 #endif
