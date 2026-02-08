@@ -11,6 +11,8 @@
 #define WAKEWORD_H
 
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +29,13 @@ extern "C" {
  * @return ESP_OK on success, or an error code if initialisation fails.
  */
 esp_err_t wakeword_start(void);
+
+/**
+ * @brief Provide a queue to receive wake-word events.
+ *
+ * When a wake word is detected, SYS_EVT_WAKE_DETECTED is posted to the queue.
+ */
+void wakeword_set_event_queue(QueueHandle_t queue);
 
 #ifdef __cplusplus
 }
