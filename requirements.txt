@@ -4,6 +4,9 @@ SpeechRecognition==3.14.3
 paho-mqtt==2.1.0
 python-dotenv==1.2.1
 
+# Google Gemini SDK for LLM-powered conversation
+google-genai>=1.0.0
+
 # Pin numpy to match system version for picamera2 compatibility
 # System picamera2 was compiled against numpy 1.24.2
 numpy==1.24.2

@@ -7,6 +7,7 @@ from stt import STT
 from tts import TTS
 from logger import AuraBotLogger, ConversationLogger
 from response_handler import ResponseHandler
+from llm_client import LLMClient
 from timer_manager import TimerManager
 from wellness_timer_trigger import WellnessTimerTrigger
 from time import sleep
@@ -40,6 +41,10 @@ class AuraBot:
                  custom_responses: Optional[Dict[str, str]] = None,
                  enable_mqtt: bool = True,
                  enable_vision: bool = False,
+                 enable_llm: bool = True,
+                 gemini_api_key: Optional[str] = None,
+                 gemini_model: str = "gemini-2.5-flash",
+                 llm_system_prompt: Optional[str] = None,
                  wellness_threshold_seconds: Optional[int] = None,
                  wellness_break_duration_seconds: Optional[int] = None,
                  wellness_pause_timeout_seconds: Optional[int] = None):
@@ -52,6 +57,10 @@ class AuraBot:
             custom_responses: Optional custom response dictionary
             enable_mqtt: Whether to enable MQTT integration for sensor data
             enable_vision: Whether to use camera for presence (person detection); requires enable_mqtt
+            enable_llm: Whether to enable LLM-powered conversation (Gemini)
+            gemini_api_key: Google AI API key (or set GEMINI_API_KEY env var)
+            gemini_model: Gemini model identifier (default: gemini-2.5-flash)
+            llm_system_prompt: Custom system prompt for the LLM personality
             wellness_threshold_seconds: Seconds of sitting before triggering wellness timer
                                       (None uses default from WellnessTimerTrigger)
             wellness_break_duration_seconds: Duration of wellness break timer in seconds
@@ -74,8 +83,28 @@ class AuraBot:
         # Initialize TimerManager (tts_engine may be replaced with wrapper below)
         self.timer_manager = TimerManager(self.tts_engine, self.logger)
 
-        # Initialize ResponseHandler with TimerManager for timer command integration
-        self.response_handler = ResponseHandler(custom_responses, self.timer_manager)
+        # Initialize LLM client for intelligent conversation (optional)
+        llm_client = None
+        if enable_llm:
+            try:
+                llm_client = LLMClient(
+                    api_key=gemini_api_key,
+                    model=gemini_model,
+                    system_prompt=llm_system_prompt,
+                )
+                self.logger.log_general(
+                    f"LLM conversation enabled (model: {gemini_model})", "INFO"
+                )
+            except Exception as e:
+                self.logger.log_error(f"Could not initialize LLM client: {e}")
+                self.logger.log_general(
+                    "Continuing without LLM — falling back to keyword responses", "WARNING"
+                )
+
+        # Initialize ResponseHandler with TimerManager and LLM client
+        self.response_handler = ResponseHandler(
+            custom_responses, self.timer_manager, llm_client=llm_client
+        )
 
         # Initialize MQTT integration (optional); when enabled, TTS also publishes to aurabot/tts/speak
         self.mqtt_api: Optional[MQTTAPI] = None
@@ -359,6 +388,9 @@ def main():
     Configuration via environment variables:
     - ENABLE_MQTT: Set to "false" to disable MQTT (default: enabled)
     - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
+    - ENABLE_LLM: Set to "false" to disable Gemini conversation (default: enabled)
+    - GEMINI_API_KEY: Google AI API key for Gemini (required when LLM is enabled)
+    - GEMINI_MODEL: Gemini model identifier (default: gemini-2.5-flash)
     - WELLNESS_THRESHOLD_SECONDS: Sitting time threshold before wellness timer triggers
     - WELLNESS_BREAK_DURATION_SECONDS: Duration of wellness break timer
     - WELLNESS_PAUSE_TIMEOUT_SECONDS: Seconds to wait while paused before stopping session
@@ -366,6 +398,11 @@ def main():
     # Check MQTT enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
     enable_vision = os.getenv("ENABLE_VISION", "false").lower() == "true"
+    
+    # LLM configuration
+    enable_llm = os.getenv("ENABLE_LLM", "true").lower() != "false"
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     
     # Get wellness configuration from environment variables
     env_threshold = os.getenv("WELLNESS_THRESHOLD_SECONDS")
@@ -381,9 +418,12 @@ def main():
     bot = AuraBot(
         enable_mqtt=enable_mqtt,
         enable_vision=enable_vision,
+        enable_llm=enable_llm,
+        gemini_api_key=gemini_api_key,
+        gemini_model=gemini_model,
         wellness_threshold_seconds=wellness_threshold,
         wellness_break_duration_seconds=break_duration,
-        wellness_pause_timeout_seconds=pause_timeout
+        wellness_pause_timeout_seconds=pause_timeout,
     )
     
     # Log configuration if set

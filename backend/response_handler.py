@@ -1,6 +1,12 @@
 """
 Response handler module.
 Handles bot response generation based on user input.
+
+Priority chain:
+  1. Exit commands  (deterministic, instant)
+  2. Timer commands (deterministic, parsed by TimerParser)
+  3. LLM conversation (Gemini-powered natural language, if available)
+  4. Keyword fallback (legacy static responses, used when LLM is unavailable)
 """
 
 from typing import Optional, Dict, Tuple
@@ -13,17 +19,22 @@ except ImportError:
 class ResponseHandler:
     """Handles bot response generation based on user input."""
     
-    def __init__(self, responses: Optional[Dict[str, str]] = None, timer_manager=None):
+    def __init__(self, responses: Optional[Dict[str, str]] = None,
+                 timer_manager=None, llm_client=None):
         """
         Initialize the response handler.
         
         Args:
             responses: Optional custom response dictionary
             timer_manager: Optional TimerManager instance for timer commands
+            llm_client: Optional LLMClient instance for AI-powered responses.
+                        When provided, general conversation is handled by the LLM
+                        instead of the static keyword map.
         """
         self.responses = responses or self._default_responses()
         self.timer_manager = timer_manager
         self.timer_parser = TimerParser() if timer_manager else None
+        self.llm_client = llm_client
     
     def _default_responses(self) -> Dict[str, str]:
         """Get default response mappings."""
@@ -39,6 +50,12 @@ class ResponseHandler:
     def get_response(self, user_text: str) -> Tuple[str, bool]:
         """
         Get bot response for user input.
+
+        Priority:
+          1. Exit commands  — deterministic, immediate
+          2. Timer commands — deterministic, parsed by TimerParser
+          3. LLM response   — natural conversation via Gemini (if available)
+          4. Keyword fallback — legacy static map (when LLM is unavailable)
         
         Args:
             user_text: User's input text (lowercase)
@@ -48,17 +65,26 @@ class ResponseHandler:
         """
         user_text_lower = user_text.lower()
         
-        # Check for exit commands
+        # 1. Exit commands (deterministic, fast)
         if "exit" in user_text_lower or "quit" in user_text_lower:
             return self.responses.get("exit", "Goodbye! Remember to stretch often."), True
         
-        # Check for timer commands (before default keyword matches)
+        # 2. Timer commands (deterministic, fast)
         if self.timer_manager and self.timer_parser:
             timer_response = self._handle_timer_command(user_text)
             if timer_response:
                 return timer_response, False
         
-        # Check for keyword matches
+        # 3. LLM-powered conversation
+        if self.llm_client is not None:
+            try:
+                llm_response = self.llm_client.generate_response(user_text)
+                return llm_response, False
+            except Exception as e:
+                # If the LLM call fails, fall through to keyword fallback
+                print(f"LLM call failed, falling back to keywords: {e}")
+        
+        # 4. Keyword fallback (used when LLM is unavailable or errored)
         for keyword, response in self.responses.items():
             if keyword in user_text_lower and keyword not in ["exit", "quit"]:
                 return response, False
