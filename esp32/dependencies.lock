@@ -68,7 +68,7 @@ dependencies:
     version: 1.5.4
   espressif/esp_hosted:
     component_hash: 
-      404f5a8f9e9bcfbce6c64e0a171e81b4a45acdb22a8c8b44988571d609e91334
+      5e1f8af8b51b47714eafb30c59bac952d6abc03125c01cb6a970f368d1e1cb83
     dependencies:
     - name: idf
       require: private
@@ -76,7 +76,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 2.11.6
+    version: 2.11.7
   espressif/esp_serial_slave_link:
     component_hash: 
       ac1776806de0a6e371c84e87898bb983e19ce62aa7f1e2e5c4a3b0234a575d2c
@@ -158,6 +158,14 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.1.3
+  lvgl/lvgl:
+    component_hash: 
+      17e68bfd21f0edf4c3ee838e2273da840bf3930e5dbc3bfa6c1190c3aed41f9f
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 9.4.0
 direct_dependencies:
 - espressif/esp-sr
 - espressif/esp_codec_dev
@@ -166,6 +174,7 @@ direct_dependencies:
 - espressif/mqtt
 - espressif/servo
 - jmattsson/picotts
-manifest_hash: 6f79f9134fce309eba573aeaca8fe595111aa643d57bc1f126b1428b84576004
+- lvgl/lvgl
+manifest_hash: 075d7b0d25783a46b2f6be124b55a21b32a45daa2a92ac9043257342a41279c6
 target: esp32p4
 version: 2.0.0

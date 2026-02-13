@@ -12,3 +12,4 @@ dependencies:
    jmattsson/picotts: ^1.1.3
    espressif/esp-sr: "*"
    espressif/servo: ^0.1.0
+   lvgl/lvgl: "~9.*"
