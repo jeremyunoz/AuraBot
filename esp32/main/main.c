@@ -21,11 +21,9 @@
 
 #include "system_events.h"
 #include "lcd_lvgl.h"
+#include "robot_eyes.h"
 
 static const char *TAG = "main";
-
-/* Defined in robot_eyes.c */
-extern void example_lvgl_demo_ui(lv_display_t *disp);
 
 typedef enum {
     SYS_STATE_IDLE = 0,
@@ -304,9 +302,13 @@ void app_main(void)
     lv_display_t *disp = lcd_lvgl_init();
     if (disp) {
         lcd_lvgl_lock();
-        example_lvgl_demo_ui(disp);
+        roboeyes_init(disp);
         lcd_lvgl_unlock();
         ESP_LOGI(TAG, "RoboEyes UI loaded");
+
+        /* Start in IDLE; other subsystems call roboeyes_set_state()
+           when the system state changes (WAKING → ACTIVE → SLEEPING). */
+        roboeyes_set_state(EYE_STATE_IDLE);
     } else {
         ESP_LOGE(TAG, "LCD/LVGL init failed");
     }

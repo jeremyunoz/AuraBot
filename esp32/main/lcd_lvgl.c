@@ -18,7 +18,6 @@
 
 #include "lcd_lvgl.h"
 
-#include <stdio.h>
 #include <unistd.h>
 #include <sys/lock.h>
 #include <sys/param.h>
