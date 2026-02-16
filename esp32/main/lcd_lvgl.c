@@ -16,7 +16,7 @@
  * SPDX-License-Identifier: CC0-1.0
  */
 
-#include "lcd_lvgl.h"
+#include "display/lcd_lvgl.h"
 
 #include <unistd.h>
 #include <sys/lock.h>

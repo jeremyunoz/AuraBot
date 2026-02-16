@@ -9,7 +9,7 @@
  *                WakeNet result, and on detection: beeps, resets the
  *                ring-buffer, re-arms WakeNet, then resumes listening.
  */
-#include "wakeword.h"
+#include "audio/wakeword.h"
 
 #include <stdlib.h>
 #include "esp_log.h"
@@ -18,7 +18,7 @@
 #include "freertos/task.h"
 #include "driver/i2s_std.h"
 
-#include "speaker.h"
+#include "audio/speaker.h"
 #include "model_path.h"
 #include "esp_afe_config.h"
 #include "esp_afe_sr_iface.h"
@@ -27,7 +27,7 @@
 #include "esp_wn_models.h"
 #include "freertos/queue.h"
 
-#include "system_events.h"
+#include "system/system_events.h"
 
 static const char *TAG = "wakeword";
 

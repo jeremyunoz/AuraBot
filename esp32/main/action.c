@@ -6,17 +6,44 @@
  *   0   = fully forward
  *   90  = neutral / standing
  *   180 = fully backward
+ *
+ * The module owns a FreeRTOS task that blocks on a length-1 queue.
+ * Any task can call action_post() to request a new action; continuous
+ * actions (walk, turn, swing) are cancelled automatically when the
+ * next command arrives.
  */
 
-#include "action.h"
-#include "servo.h"
+#include "motion/action.h"
+#include "motion/servo.h"
+
+#include <string.h>
+
+#include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
-/* Global state shared with the action task in main.c */
-extern volatile int state;
-extern int last_state;
+static const char *TAG = "action";
+
+/* -------------------------------------------------------------------------- */
+/*  Internal state                                                             */
+/* -------------------------------------------------------------------------- */
+
+/** Length-1 queue so xQueueOverwrite always succeeds. */
+static QueueHandle_t  s_action_queue        = NULL;
+
+/** Set true by action_post() to break out of continuous loops. */
+static volatile bool  s_cancel              = false;
+
+/** Tracks the last completed action (for transition logic in stand()). */
+static action_id_t    s_last_action         = ACTION_STAND;
+
+/** When false, action_post_user() silently drops commands. */
+static bool           s_user_control        = false;
+
+#define ACTION_TASK_STACK  4096
+#define ACTION_TASK_PRIO   5
 
 /* -------------------------------------------------------------------------- */
 /*  Utility                                                                    */
@@ -27,10 +54,13 @@ void delay_ms(int ms)
     vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
-/** Return true while the global state still matches @p expected. */
-static inline bool action_active(int expected)
+/**
+ * Return true while no cancellation has been requested.
+ * Called inside continuous action loops (walk, turn, swing).
+ */
+static inline bool action_should_continue(void)
 {
-    return state == expected;
+    return !s_cancel;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -40,7 +70,7 @@ static inline bool action_active(int expected)
 void stand(void)
 {
     /* Coming from sit or wave: lift front legs first to avoid scraping */
-    if (last_state == ACTION_SIT || last_state == ACTION_WAVE) {
+    if (s_last_action == ACTION_SIT || s_last_action == ACTION_WAVE) {
         FL_angle(45);
         FR_angle(45);
         RL_angle(45);
@@ -80,14 +110,15 @@ void wave(void)
     sit();
     delay_ms(500);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 3 && action_should_continue(); i++) {
         FR_angle(0);
         delay_ms(350);
+        if (!action_should_continue()) break;
         FR_angle(60);
         delay_ms(350);
     }
 
-    state = ACTION_STAND;  /* auto-return to standing */
+    /* Let the state machine drive the next pose (WAKING → ACTIVE → stand). */
 }
 
 /* -------------------------------------------------------------------------- */
@@ -96,45 +127,43 @@ void wave(void)
 
 void walk(void)
 {
-    const int saved = state;
-
-    while (action_active(saved)) {
+    while (action_should_continue()) {
         /* Phase 1: FL + RR step forward */
         FL_angle(45);
         RR_angle(45);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(135);
         RL_angle(135);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(90);
         RR_angle(90);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(90);
         RL_angle(90);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         /* Phase 2: FR + RL step forward */
         FR_angle(45);
         RL_angle(45);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(135);
         RR_angle(135);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(90);
         RL_angle(90);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(90);
         RR_angle(90);
@@ -146,45 +175,43 @@ void walk(void)
 
 void walk_back(void)
 {
-    const int saved = state;
-
-    while (action_active(saved)) {
+    while (action_should_continue()) {
         /* Phase 1: FL + RR step backward */
         FL_angle(135);
         RR_angle(135);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(45);
         RL_angle(45);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(90);
         RR_angle(90);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(90);
         RL_angle(90);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         /* Phase 2: FR + RL step backward */
         FR_angle(135);
         RL_angle(135);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(45);
         RR_angle(45);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(90);
         RL_angle(90);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(90);
         RR_angle(90);
@@ -196,23 +223,21 @@ void walk_back(void)
 
 void turn_left(void)
 {
-    const int saved = state;
-
-    while (action_active(saved)) {
+    while (action_should_continue()) {
         FR_angle(45);
         RL_angle(135);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(45);
         RR_angle(135);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(90);
         RL_angle(90);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(90);
         RR_angle(90);
@@ -224,23 +249,21 @@ void turn_left(void)
 
 void turn_right(void)
 {
-    const int saved = state;
-
-    while (action_active(saved)) {
+    while (action_should_continue()) {
         FL_angle(45);
         RR_angle(135);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(45);
         RL_angle(135);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(90);
         RR_angle(90);
         delay_ms(250);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FR_angle(90);
         RL_angle(90);
@@ -252,15 +275,13 @@ void turn_right(void)
 
 void swing(void)
 {
-    const int saved = state;
-
-    while (action_active(saved)) {
+    while (action_should_continue()) {
         FL_angle(135);
         FR_angle(135);
         RL_angle(135);
         RR_angle(135);
         delay_ms(500);
-        if (!action_active(saved)) break;
+        if (!action_should_continue()) break;
 
         FL_angle(45);
         FR_angle(45);
@@ -270,4 +291,139 @@ void swing(void)
     }
 
     stand();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Action task                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * @brief Reset to standing before a locomotion action.
+ */
+static void ensure_standing(void)
+{
+    stand();
+    delay_ms(250);
+}
+
+static void action_task(void *arg)
+{
+    (void)arg;
+    action_id_t cmd;
+
+    while (1) {
+        if (xQueueReceive(s_action_queue, &cmd, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        s_cancel = false;
+        ESP_LOGI(TAG, "Action cmd=%d", (int)cmd);
+
+        switch (cmd) {
+        case ACTION_STAND:
+            stand();
+            break;
+
+        case ACTION_SIT:
+            sit();
+            break;
+
+        case ACTION_LAY_DOWN:
+            lay_down();
+            break;
+
+        case ACTION_WAVE:
+            wave();
+            break;
+
+        case ACTION_WALK:
+            ensure_standing();
+            walk();
+            break;
+
+        case ACTION_BACK:
+            ensure_standing();
+            walk_back();
+            break;
+
+        case ACTION_TURN_LEFT:
+            ensure_standing();
+            turn_left();
+            break;
+
+        case ACTION_TURN_RIGHT:
+            ensure_standing();
+            turn_right();
+            break;
+
+        case ACTION_SWING:
+            ensure_standing();
+            swing();
+            break;
+
+        default:
+            stand();
+            break;
+        }
+
+        s_last_action = cmd;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public API                                                                 */
+/* -------------------------------------------------------------------------- */
+
+void action_task_start(void)
+{
+    servo_init();
+
+    /* Length-1 queue: xQueueOverwrite always succeeds, latest command wins. */
+    s_action_queue = xQueueCreate(1, sizeof(action_id_t));
+    configASSERT(s_action_queue);
+
+    xTaskCreate(action_task, "action_task", ACTION_TASK_STACK, NULL,
+                ACTION_TASK_PRIO, NULL);
+
+    ESP_LOGI(TAG, "Action subsystem started");
+}
+
+void action_post(action_id_t id)
+{
+    if (!s_action_queue) return;
+    s_cancel = true;                        /* interrupt running action */
+    (void)xQueueOverwrite(s_action_queue, &id);
+}
+
+void action_post_user(action_id_t id)
+{
+    if (!s_user_control) {
+        ESP_LOGW(TAG, "User control disabled, ignoring action %d", (int)id);
+        return;
+    }
+    action_post(id);
+}
+
+void action_set_user_control(bool enabled)
+{
+    s_user_control = enabled;
+    ESP_LOGI(TAG, "User control %s", enabled ? "ENABLED" : "DISABLED");
+}
+
+action_id_t action_from_string(const char *name)
+{
+    if (!name) return ACTION_STAND;
+
+    if (strcmp(name, "stand")      == 0) return ACTION_STAND;
+    if (strcmp(name, "walk")       == 0) return ACTION_WALK;
+    if (strcmp(name, "back")       == 0) return ACTION_BACK;
+    if (strcmp(name, "lay_down")   == 0) return ACTION_LAY_DOWN;
+    if (strcmp(name, "turn_left")  == 0) return ACTION_TURN_LEFT;
+    if (strcmp(name, "turn_right") == 0) return ACTION_TURN_RIGHT;
+    if (strcmp(name, "sit")        == 0) return ACTION_SIT;
+    if (strcmp(name, "wave")       == 0) return ACTION_WAVE;
+    if (strcmp(name, "swing")      == 0) return ACTION_SWING;
+
+    ESP_LOGW(TAG, "Unknown action name: %s", name);
+    return ACTION_STAND;
 }

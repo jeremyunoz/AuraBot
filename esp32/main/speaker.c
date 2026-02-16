@@ -8,7 +8,7 @@
  * components/esp_codec_dev and component registry esp_codec_dev.
  * Requires CONFIG_CODEC_ES8311_SUPPORT in esp_codec_dev.
  */
-#include "speaker.h"
+#include "audio/speaker.h"
 
 #if CONFIG_SPEAKER_ENABLE
 #include "sdkconfig.h"
@@ -39,7 +39,7 @@
 #error "Speaker driver requires ES8311. Enable CONFIG_CODEC_ES8311_SUPPORT in esp_codec_dev."
 #endif
 
-#include "speaker_config.h"
+#include "audio/speaker_config.h"
 
 static const char *TAG = "speaker";
 

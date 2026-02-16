@@ -9,19 +9,19 @@
 #include "freertos/queue.h"
 #include "freertos/event_groups.h"
 
-#include "speaker.h"
-#include "tts.h"
-#include "wakeword.h"
-#include "wifi_connect.h"
-#include "mqtt.h"
-#include "pir.h"
+#include "audio/speaker.h"
+#include "audio/tts.h"
+#include "audio/wakeword.h"
+#include "network/wifi_connect.h"
+#include "network/mqtt.h"
+#include "sensors/pir.h"
 #include "driver/gpio.h"
-// #include "action.h"
-// #include "servo.h"
+#include "motion/action.h"
+#include "motion/servo.h"
 
-#include "system_events.h"
-#include "lcd_lvgl.h"
-#include "robot_eyes.h"
+#include "system/system_events.h"
+#include "display/lcd_lvgl.h"
+#include "display/robot_eyes.h"
 
 static const char *TAG = "main";
 
@@ -41,9 +41,6 @@ static QueueHandle_t s_evt_queue = NULL;
 static EventGroupHandle_t s_pir_evt = NULL;
 static sys_state_t s_state = SYS_STATE_IDLE;
 static bool s_pir_configured = false;
-
-// volatile int state = 0;   // servo/action only
-// int last_state = -1;      // servo/action only
 
 static const char *state_to_str(sys_state_t state)
 {
@@ -85,10 +82,23 @@ static roboeyes_state_t sys_to_eye_state(sys_state_t s)
     }
 }
 
+static action_id_t sys_to_action(sys_state_t s)
+{
+    switch (s) {
+    case SYS_STATE_IDLE:     return ACTION_STAND;
+    case SYS_STATE_WAKING:   return ACTION_WAVE;
+    case SYS_STATE_ACTIVE:   return ACTION_STAND;
+    case SYS_STATE_SLEEPING: return ACTION_LAY_DOWN;
+    default:                 return ACTION_SIT;
+    }
+}
+
 static void set_state(sys_state_t state)
 {
     s_state = state;
     roboeyes_set_state(sys_to_eye_state(state));
+    action_post(sys_to_action(state));
+    action_set_user_control(state == SYS_STATE_ACTIVE);
     publish_state(state);
     ESP_LOGI(TAG, "State -> %s", state_to_str(state));
 }
@@ -121,13 +131,19 @@ static void pir_task(void *arg)
 
 static void enter_sleeping(void)
 {
-    set_state(SYS_STATE_SLEEPING);
+    set_state(SYS_STATE_SLEEPING); // announce over MQTT while still connected
+
+    /* Give the servos time to reach the lay-down pose before teardown. */
+    vTaskDelay(pdMS_TO_TICKS(1500));
 
     mqtt_stop();
     wifi_disconnect_sta();
 
+    /* Connectivity is down -- update local state and pose to idle / sit. */
     s_state = SYS_STATE_IDLE;
     roboeyes_set_state(EYE_STATE_IDLE);
+    action_post(ACTION_SIT);
+    action_set_user_control(false);
     ESP_LOGI(TAG, "State -> %s", state_to_str(s_state));
 }
 
@@ -207,7 +223,8 @@ static void state_task(void *arg)
             break;
 
         case SYS_STATE_ACTIVE:
-            if (evt.id == SYS_EVT_SESSION_END) {
+            // Managed by MQTT control command, e.g. {"cmd":"sleep"}
+            if (evt.id == SYS_EVT_SESSION_END) {  
                 enter_sleeping();
             }
             break;
@@ -219,85 +236,6 @@ static void state_task(void *arg)
         }
     }
 }
-
-// /**
-//  * @brief Reset to standing before a locomotion action.
-//  */
-// static void ensure_standing(void)
-// {
-//     stand();
-//     delay_ms(250);
-// }
-
-// /**
-//  * @brief Main action dispatcher task.
-//  *
-//  * Polls the global @c state variable and runs the corresponding action
-//  * whenever it changes.
-//  */
-// void action_task(void *pvParameters)
-// {
-//     (void)pvParameters;
-//
-//     while (1) {
-//         int current = state;
-//
-//         if (current != last_state) {
-//             switch ((action_id_t)current) {
-//             case ACTION_STAND:
-//                 stand();
-//                 break;
-//
-//             case ACTION_WALK:
-//                 ensure_standing();
-//                 walk();
-//                 break;
-//
-//             case ACTION_BACK:
-//                 ensure_standing();
-//                 walk_back();
-//                 break;
-//
-//             case ACTION_LAY_DOWN:
-//                 lay_down();
-//                 break;
-//
-//             case ACTION_TURN_LEFT:
-//                 ensure_standing();
-//                 turn_left();
-//                 break;
-//
-//             case ACTION_TURN_RIGHT:
-//                 ensure_standing();
-//                 turn_right();
-//                 break;
-//
-//             case ACTION_SIT:
-//                 sit();
-//                 break;
-//
-//             case ACTION_WAVE:
-//                 wave();
-//                 break;
-//
-//             case ACTION_SWING:
-//                 ensure_standing();
-//                 swing();
-//                 break;
-//
-//             default:
-//                 stand();
-//                 break;
-//             }
-//
-//             last_state = current;
-//         }
-//
-//         vTaskDelay(pdMS_TO_TICKS(20));
-//     }
-// }
-
-
 
 void app_main(void)
 {
@@ -323,8 +261,8 @@ void app_main(void)
         ESP_LOGE(TAG, "LCD/LVGL init failed");
     }
 
-    // servo_init();                 // No servos on board
-    // xTaskCreate(action_task, "action_task", 4096, NULL, 5, NULL);  // No servos on board
+    /* ---- Servo / action subsystem ---- */
+    action_task_start();
 
     /* Initialize speaker (also sets up I2S RX for mic input) */
 #if CONFIG_SPEAKER_ENABLE

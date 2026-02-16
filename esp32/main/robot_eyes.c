@@ -10,7 +10,7 @@
  *      callbacks).
  */
 
-#include "robot_eyes.h"
+#include "display/robot_eyes.h"
 
 #include "lvgl.h"
 #include "esp_log.h"

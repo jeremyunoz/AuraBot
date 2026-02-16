@@ -1,8 +1,8 @@
-#include "tts.h"
+#include "audio/tts.h"
 
 #include "esp_log.h"
 #include "picotts.h"
-#include "speaker.h"
+#include "audio/speaker.h"
 #include <string.h>
 
 static const char *TAG = "tts";

@@ -15,7 +15,7 @@ typedef struct {
 
 /*
  * pir_int_interrupt：
- * - 把 PIR GPIO 配置成“中断输入”
+ * - 把 PIR GPIO 配置成"中断输入"
  * - 当 PIR 触发时：
  *     → 向 event_group 里设置一个 bit
  *
@@ -32,4 +32,3 @@ uint32_t pir_get_count(void);
 
 /* Reset PIR trigger count to zero */
 void pir_reset_count(void);
-

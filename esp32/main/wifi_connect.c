@@ -10,7 +10,7 @@
 #include "esp_mac.h"
 #include "esp_err.h"
 
-#include "wifi_connect.h"
+#include "network/wifi_connect.h"
 static const char *TAG = "wifi_connect";
 
 #define WIFI_CONNECTED_BIT BIT0

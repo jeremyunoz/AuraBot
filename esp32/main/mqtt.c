@@ -1,4 +1,4 @@
-#include "mqtt.h"
+#include "network/mqtt.h"
 
 #include "esp_log.h"
 #include "mqtt_client.h"
@@ -6,10 +6,11 @@
 
 #include "cJSON.h"
 
-#include "system_events.h"
+#include "system/system_events.h"
+#include "motion/action.h"
 
 #if CONFIG_SPEAKER_ENABLE
-#include "tts.h"
+#include "audio/tts.h"
 #endif
 
 static const char *TAG = "mqtt";
@@ -110,6 +111,15 @@ static void handle_control_command(const esp_mqtt_event_handle_t event)
         mqtt_post_event(SYS_EVT_SESSION_END);
     } else if (strcmp(cmd->valuestring, "reconnect") == 0) {
         mqtt_post_event(SYS_EVT_FORCE_WAKE);
+    } else if (strcmp(cmd->valuestring, "move") == 0) {
+        /* User movement: {"cmd":"move","action":"walk"} */
+        const cJSON *action = cJSON_GetObjectItemCaseSensitive(root, "action");
+        if (cJSON_IsString(action) && action->valuestring) {
+            action_id_t id = action_from_string(action->valuestring);
+            action_post_user(id);
+        } else {
+            ESP_LOGW(TAG, "move cmd missing 'action' string");
+        }
     } else {
         ESP_LOGW(TAG, "Unknown control cmd: %s", cmd->valuestring);
     }

@@ -3,7 +3,7 @@
  * @brief Low-level servo driver implementation for AuraBot quadruped legs.
  */
 
-#include "servo.h"
+#include "motion/servo.h"
 
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"

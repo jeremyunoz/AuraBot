@@ -1,4 +1,4 @@
-#include "pir.h"
+#include "sensors/pir.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include <stdbool.h>
