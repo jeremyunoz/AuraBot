@@ -19,6 +19,7 @@
 #include "driver/i2s_std.h"
 
 #include "audio/speaker.h"
+#include "voice/voice_session.h"
 #include "model_path.h"
 #include "esp_afe_config.h"
 #include "esp_afe_sr_iface.h"
@@ -89,7 +90,13 @@ static void feed_task(void *arg)
                      esp_err_to_name(ret), (unsigned)bytes_read, (unsigned)frame_bytes);
             continue;
         }
-        afe->feed(afe_data, buf);
+        if (voice_session_is_active()) {
+            /* Voice session: push PCM to Opus/WebSocket path; do not feed AFE */
+            size_t samples = bytes_read / sizeof(int16_t);
+            voice_session_push_pcm(buf, samples);
+        } else {
+            afe->feed(afe_data, buf);
+        }
     }
 }
 

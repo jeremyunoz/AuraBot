@@ -22,6 +22,7 @@
 #include "system/system_events.h"
 #include "display/lcd_lvgl.h"
 #include "display/robot_eyes.h"
+#include "voice/voice_session.h"
 
 static const char *TAG = "main";
 
@@ -100,6 +101,9 @@ static void set_state(sys_state_t state)
     action_post(sys_to_action(state));
     action_set_user_control(state == SYS_STATE_ACTIVE);
     publish_state(state);
+    if (state == SYS_STATE_ACTIVE) {
+        (void)voice_session_start();
+    }
     ESP_LOGI(TAG, "State -> %s", state_to_str(state));
 }
 
@@ -131,6 +135,7 @@ static void pir_task(void *arg)
 
 static void enter_sleeping(void)
 {
+    voice_session_stop();
     set_state(SYS_STATE_SLEEPING); // announce over MQTT while still connected
 
     /* Give the servos time to reach the lay-down pose before teardown. */
@@ -223,8 +228,7 @@ static void state_task(void *arg)
             break;
 
         case SYS_STATE_ACTIVE:
-            // Managed by MQTT control command, e.g. {"cmd":"sleep"}
-            if (evt.id == SYS_EVT_SESSION_END) {  
+            if (evt.id == SYS_EVT_SESSION_END) {
                 enter_sleeping();
             }
             break;
