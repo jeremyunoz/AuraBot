@@ -1,4 +1,15 @@
 dependencies:
+  78/esp-opus:
+    component_hash: 
+      8182b733f071d7bfe1e837f4c9f8649a63e4c937177f089e65772880c02f2e17
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.5
   espressif/dl_fft:
     component_hash: 
       7dadbd644c0d7ba4733cc3726ec4cff6edf27b043725e1115861dec1609a3d28
@@ -88,6 +99,17 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.1.2
+  espressif/esp_websocket_client:
+    component_hash: 
+      c5a067a9fddea370c478017e66fac302f4b79c3d4027e9bdd42a019786cceb92
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.6.1
   espressif/esp_wifi_remote:
     component_hash: 
       67efd839bd84efb94b149a28044f9918473e7f4facf709bf4121744e4927df09
@@ -167,14 +189,16 @@ dependencies:
       type: service
     version: 9.4.0
 direct_dependencies:
+- 78/esp-opus
 - espressif/esp-sr
 - espressif/esp_codec_dev
 - espressif/esp_hosted
+- espressif/esp_websocket_client
 - espressif/esp_wifi_remote
 - espressif/mqtt
 - espressif/servo
 - jmattsson/picotts
 - lvgl/lvgl
-manifest_hash: 075d7b0d25783a46b2f6be124b55a21b32a45daa2a92ac9043257342a41279c6
+manifest_hash: 0f5982db9a0f0f8e8127698476a48315fb2365ca913b31e5766a63b227e99f24
 target: esp32p4
 version: 2.0.0

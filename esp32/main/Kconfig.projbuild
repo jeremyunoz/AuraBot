@@ -146,4 +146,20 @@ menu "AuraBot Configuration"
 
     endmenu
 
+    menu "Voice session (online TTS / Pi5 WebSocket)"
+        config VOICE_SESSION_ENABLE
+            bool "Enable voice session (Opus + WebSocket to Pi5)"
+            default n
+            help
+                When enabled, after wake and when ACTIVE, capture mic PCM, encode with Opus,
+                and send to Pi5 over WebSocket. Receive and play TTS from server.
+
+        config VOICE_WS_URI
+            string "WebSocket URI for Pi5 voice server"
+            depends on VOICE_SESSION_ENABLE
+            default "ws://pi5.local:8765/voice"
+            help
+                URI for the Pi5 WebSocket voice server (e.g. ws://host:port/path).
+    endmenu
+
 endmenu

@@ -13,3 +13,5 @@ dependencies:
    espressif/esp-sr: "*"
    espressif/servo: ^0.1.0
    lvgl/lvgl: "~9.*"
+   espressif/esp_websocket_client: "*"
+   78/esp-opus: "^1.0.4"
