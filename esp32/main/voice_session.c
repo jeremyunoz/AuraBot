@@ -27,13 +27,18 @@ static const char *TAG = "voice_session";
 #define FRAME_SAMPLES       ((FRAME_MS * SAMPLE_RATE) / 1000)  /* 960 */
 #define FRAME_BYTES         (FRAME_SAMPLES * sizeof(int16_t))  /* 1920 */
 #define OPUS_MAX_PACKET     1275
-#define PCM_BUF_SIZE        (FRAME_BYTES * 4)
+/* Minimal PCM buffer: 2 frames to avoid accumulation and save RAM; encoder consumes one frame at a time */
+#define PCM_BUF_SIZE        (FRAME_BYTES * 2)
 #define PLAYBACK_BUF_SIZE   (FRAME_BYTES * 4)
-#define ENCODER_TASK_STACK  4096
+/* Opus encoder needs deep stack (e.g. xiaozhi-esp32 uses 24KB for opus_codec task) */
+#define ENCODER_TASK_STACK  24576
 #define ENCODER_TASK_PRIO   5
-#define PLAYBACK_TASK_STACK 2048
+#define PLAYBACK_TASK_STACK 2560
 #define PLAYBACK_TASK_PRIO  6
 #define HELLO_TIMEOUT_MS    10000
+/* Encoder timing: one 60ms frame every 60ms; timeouts keep pipeline moving without accumulation */
+#define ENCODER_RECV_TICKS  pdMS_TO_TICKS(60)   /* wait up to one frame time for PCM */
+#define ENCODER_SEND_TICKS  pdMS_TO_TICKS(80)   /* allow send ~1 frame time; avoid blocking pipeline */
 
 static const char HELLO_JSON[] =
     "{\"type\":\"hello\",\"version\":1,\"transport\":\"websocket\","
@@ -48,6 +53,9 @@ static StreamBufferHandle_t s_playback_stream;
 static TaskHandle_t s_encoder_task_handle;
 static TaskHandle_t s_playback_task_handle;
 static bool s_hello_acked;
+static uint8_t s_playback_buf[FRAME_BYTES];  /* Off-stack to avoid playback task overflow */
+static uint8_t s_encoder_opus_buf[OPUS_MAX_PACKET];
+static int16_t s_encoder_pcm_frame[FRAME_SAMPLES];
 
 static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -112,9 +120,6 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
 static void encoder_task(void *arg)
 {
     (void)arg;
-    uint8_t opus_buf[OPUS_MAX_PACKET];
-    int16_t pcm_frame[FRAME_SAMPLES];
-
     while (1) {
         if (!s_session_active || !s_ws_client || !esp_websocket_client_is_connected(s_ws_client)) {
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -125,17 +130,19 @@ static void encoder_task(void *arg)
             continue;
         }
 
-        size_t received = xStreamBufferReceive(s_pcm_stream, pcm_frame, FRAME_BYTES, pdMS_TO_TICKS(100));
+        /* Consume exactly one frame; short wait keeps us in sync with real-time (no backlog) */
+        size_t received = xStreamBufferReceive(s_pcm_stream, s_encoder_pcm_frame, FRAME_BYTES, ENCODER_RECV_TICKS);
         if (received != FRAME_BYTES) {
             continue;
         }
 
-        int len = opus_encode(s_opus_enc, pcm_frame, FRAME_SAMPLES, opus_buf, sizeof(opus_buf));
+        int len = opus_encode(s_opus_enc, s_encoder_pcm_frame, FRAME_SAMPLES, s_encoder_opus_buf, sizeof(s_encoder_opus_buf));
         if (len < 0) {
             ESP_LOGW(TAG, "opus_encode error %d", len);
             continue;
         }
-        int sent = esp_websocket_client_send_bin(s_ws_client, (const char *)opus_buf, len, pdMS_TO_TICKS(200));
+        /* Send with frame-aligned timeout so we don't stall and accumulate PCM; drop packet if WS slow */
+        int sent = esp_websocket_client_send_bin(s_ws_client, (const char *)s_encoder_opus_buf, len, ENCODER_SEND_TICKS);
         if (sent != len) {
             ESP_LOGW(TAG, "WS send_bin %d/%d", sent, len);
         }
@@ -145,13 +152,11 @@ static void encoder_task(void *arg)
 static void playback_task(void *arg)
 {
     (void)arg;
-    uint8_t buf[FRAME_BYTES];
-
     while (1) {
-        size_t received = xStreamBufferReceive(s_playback_stream, buf, sizeof(buf), pdMS_TO_TICKS(100));
+        size_t received = xStreamBufferReceive(s_playback_stream, s_playback_buf, sizeof(s_playback_buf), pdMS_TO_TICKS(100));
         if (received == 0) continue;
         if (!speaker_is_ready()) continue;
-        (void)speaker_write(buf, received);
+        (void)speaker_write(s_playback_buf, received);
     }
 }
 
@@ -195,6 +200,7 @@ void voice_session_push_pcm(const int16_t *pcm, size_t samples)
 {
     if (!s_session_active || !s_pcm_stream || !pcm) return;
     size_t bytes = samples * sizeof(int16_t);
+    /* Non-blocking: send only what fits (PCM_BUF_SIZE = 2 frames). Excess dropped to avoid accumulation. */
     (void)xStreamBufferSend(s_pcm_stream, pcm, bytes, 0);
 }
 
@@ -226,7 +232,8 @@ esp_err_t voice_session_start(void)
         ESP_LOGE(TAG, "opus_encoder_create failed %d", err);
         return ESP_FAIL;
     }
-    opus_encoder_ctl(s_opus_enc, OPUS_SET_COMPLEXITY(5));
+    /* Complexity 0 reduces stack/CPU (xiaozhi-esp32 uses 0); 5 was causing stack overflows */
+    opus_encoder_ctl(s_opus_enc, OPUS_SET_COMPLEXITY(0));
 
     s_opus_dec = opus_decoder_create(SAMPLE_RATE, CHANNELS, &err);
     if (!s_opus_dec || err != OPUS_OK) {
