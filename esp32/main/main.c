@@ -1,5 +1,6 @@
 #include <stdio.h>
 
+#include "sdkconfig.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -141,7 +142,9 @@ static void enter_sleeping(void)
     /* Give the servos time to reach the lay-down pose before teardown. */
     vTaskDelay(pdMS_TO_TICKS(1500));
 
+#if CONFIG_MQTT_ENABLE
     mqtt_stop();
+#endif
     wifi_disconnect_sta();
 
     /* Connectivity is down -- update local state and pose to idle / sit. */
@@ -169,6 +172,7 @@ static void enter_waking(void)
         return;
     }
 
+#if CONFIG_MQTT_ENABLE
     if (mqtt_start() != ESP_OK) {
         ESP_LOGE(TAG, "MQTT start failed");
         enter_sleeping();
@@ -192,6 +196,9 @@ static void enter_waking(void)
         1,
         1
     );
+#else
+    ESP_LOGI(TAG, "MQTT disabled (voice-session-only test)");
+#endif
 
     if (!s_pir_evt) {
         s_pir_evt = xEventGroupCreate();
@@ -291,7 +298,9 @@ void app_main(void)
         return;
     }
     wakeword_set_event_queue(s_evt_queue);
+#if CONFIG_MQTT_ENABLE
     mqtt_set_event_queue(s_evt_queue);
+#endif
 
     s_pir_evt = xEventGroupCreate();
     if (!s_pir_evt) {

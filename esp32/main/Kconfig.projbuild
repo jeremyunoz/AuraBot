@@ -146,6 +146,12 @@ menu "AuraBot Configuration"
 
     endmenu
 
+    config MQTT_ENABLE
+        bool "Enable MQTT client (broker required for full pipeline)"
+        default n
+        help
+            When disabled, wake flow skips MQTT connect so voice session can be tested without a broker. Set to y for full pipeline with Pi5/MQTT.
+
     menu "Voice session (online TTS / Pi5 WebSocket)"
         config VOICE_SESSION_ENABLE
             bool "Enable voice session (Opus + WebSocket to Pi5)"

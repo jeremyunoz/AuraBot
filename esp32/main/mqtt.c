@@ -1,4 +1,7 @@
 #include "network/mqtt.h"
+#include "sdkconfig.h"
+
+#if CONFIG_MQTT_ENABLE
 
 #include "esp_log.h"
 #include "mqtt_client.h"
@@ -261,3 +264,41 @@ bool mqtt_is_connected(void)
 {
     return connected;
 }
+
+#else /* !CONFIG_MQTT_ENABLE */
+
+/* Stubs for voice-session-only build (no broker required) */
+#include "esp_log.h"
+#include "esp_err.h"
+#include "freertos/queue.h"
+
+esp_err_t mqtt_start(void)
+{
+    (void)0;
+    return ESP_OK;
+}
+
+void mqtt_stop(void)
+{
+}
+
+esp_err_t mqtt_publish(const char *topic, const char *payload, int qos, int retain)
+{
+    (void)topic;
+    (void)payload;
+    (void)qos;
+    (void)retain;
+    return ESP_OK;
+}
+
+bool mqtt_is_connected(void)
+{
+    return false;
+}
+
+void mqtt_set_event_queue(QueueHandle_t queue)
+{
+    (void)queue;
+}
+
+#endif /* CONFIG_MQTT_ENABLE */
