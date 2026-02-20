@@ -27,6 +27,7 @@ static voice_ws_disconnect_cb_t s_disconnect_cb;
 static void *s_disconnect_cb_arg;
 static voice_ws_connected_cb_t s_connected_cb;
 static void *s_connected_cb_arg;
+static bool s_disconnect_handled;
 
 static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -36,6 +37,7 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
 
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED:
+        s_disconnect_handled = false;
         ESP_LOGI(TAG, "WebSocket connected");
         if (s_connected_cb) {
             s_connected_cb(s_connected_cb_arg);
@@ -60,9 +62,12 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
     case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGI(TAG, "WebSocket disconnected or error");
-        if (s_disconnect_cb) {
-            s_disconnect_cb(s_disconnect_cb_arg);
+        if (!s_disconnect_handled) {
+            s_disconnect_handled = true;
+            ESP_LOGI(TAG, "WebSocket closed (server down?), returning to idle");
+            if (s_disconnect_cb) {
+                s_disconnect_cb(s_disconnect_cb_arg);
+            }
         }
         break;
 
@@ -131,6 +136,7 @@ esp_err_t voice_ws_start(const char *uri)
 void voice_ws_stop(void)
 {
     if (s_ws_client) {
+        s_disconnect_handled = true;
         esp_websocket_client_close(s_ws_client, pdMS_TO_TICKS(1000));
         esp_websocket_client_stop(s_ws_client);
         esp_websocket_client_destroy(s_ws_client);

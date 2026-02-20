@@ -55,6 +55,9 @@ typedef struct {
 
 static volatile bool s_session_active;
 static volatile voice_phase_t s_phase;
+static voice_conversation_session_end_cb_t s_session_end_cb;
+static void *s_session_end_cb_arg;
+static bool s_session_end_notified;
 static OpusEncoder *s_opus_enc;
 static OpusDecoder *s_opus_dec;
 static StreamBufferHandle_t s_pcm_stream;
@@ -112,6 +115,10 @@ static void on_ws_disconnect(void *arg)
 {
     (void)arg;
     s_session_active = false;
+    if (s_session_end_cb && !s_session_end_notified) {
+        s_session_end_notified = true;
+        s_session_end_cb(s_session_end_cb_arg);
+    }
 }
 
 static void decoder_task(void *arg)
@@ -237,6 +244,7 @@ static void create_tasks_and_buffers(void)
         s_decoder_queue = NULL;
         s_encoder_task_handle = NULL;
         s_decoder_task_handle = NULL;
+        return;
     }
 }
 
@@ -262,6 +270,7 @@ esp_err_t voice_conversation_start(const char *uri)
         return ESP_ERR_INVALID_ARG;
     }
 
+    s_session_end_notified = false;
     create_tasks_and_buffers();
     if (!s_pcm_stream) {
         return ESP_FAIL;
@@ -301,9 +310,18 @@ esp_err_t voice_conversation_start(const char *uri)
     return ESP_OK;
 }
 
+void voice_conversation_set_session_end_callback(voice_conversation_session_end_cb_t cb, void *arg)
+{
+    s_session_end_cb = cb;
+    s_session_end_cb_arg = arg;
+}
+
 void voice_conversation_stop(void)
 {
     s_session_active = false;
+    s_session_end_notified = false;
+    s_session_end_cb = NULL;
+    s_session_end_cb_arg = NULL;
 
     voice_ws_stop();
 
@@ -325,5 +343,6 @@ void voice_conversation_push_pcm(const int16_t *pcm, size_t samples) { (void)pcm
 bool voice_conversation_is_active(void) { return false; }
 esp_err_t voice_conversation_start(const char *uri) { (void)uri; return ESP_ERR_NOT_SUPPORTED; }
 void voice_conversation_stop(void) { }
+void voice_conversation_set_session_end_callback(voice_conversation_session_end_cb_t cb, void *arg) { (void)cb; (void)arg; }
 
 #endif /* CONFIG_VOICE_SESSION_ENABLE */

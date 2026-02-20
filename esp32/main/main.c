@@ -385,6 +385,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to create event queue");
         return;
     }
+    voice_session_set_event_queue(s_evt_queue);
     wakeword_set_event_queue(s_evt_queue);
 #if CONFIG_MQTT_ENABLE
     mqtt_set_event_queue(s_evt_queue);

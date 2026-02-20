@@ -12,6 +12,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +30,9 @@ esp_err_t voice_session_start(void);
 
 /** Stop voice session: close WebSocket, stop capture; wakeword resumes feeding AFE */
 void voice_session_stop(void);
+
+/** Set event queue to post SYS_EVT_SESSION_END when WebSocket disconnects (e.g. server down). */
+void voice_session_set_event_queue(QueueHandle_t queue);
 
 #ifdef __cplusplus
 }

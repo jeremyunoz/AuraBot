@@ -28,6 +28,10 @@ esp_err_t voice_conversation_start(const char *uri);
 /** Stop conversation: stop WS, destroy Opus and tasks */
 void voice_conversation_stop(void);
 
+/** Callback when session ends (e.g. WebSocket disconnected). Called from WS task context. */
+typedef void (*voice_conversation_session_end_cb_t)(void *arg);
+void voice_conversation_set_session_end_callback(voice_conversation_session_end_cb_t cb, void *arg);
+
 #ifdef __cplusplus
 }
 #endif

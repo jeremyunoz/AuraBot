@@ -8,13 +8,30 @@
 
 #include "voice/voice_session.h"
 #include "voice/voice_conversation.h"
+#include "system/system_events.h"
 #include "sdkconfig.h"
 
 #if CONFIG_VOICE_SESSION_ENABLE
 
 #include "esp_log.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "voice_session";
+static QueueHandle_t s_evt_queue = NULL;
+
+static void on_session_end(void *arg)
+{
+    (void)arg;
+    if (s_evt_queue) {
+        sys_event_t evt = { .id = SYS_EVT_SESSION_END };
+        (void)xQueueSend(s_evt_queue, &evt, 0);
+    }
+}
+
+void voice_session_set_event_queue(QueueHandle_t queue)
+{
+    s_evt_queue = queue;
+}
 
 void voice_session_push_pcm(const int16_t *pcm, size_t samples)
 {
@@ -33,6 +50,7 @@ esp_err_t voice_session_start(void)
         ESP_LOGE(TAG, "CONFIG_VOICE_WS_URI not set");
         return ESP_ERR_INVALID_ARG;
     }
+    voice_conversation_set_session_end_callback(on_session_end, NULL);
     return voice_conversation_start(uri);
 }
 
@@ -61,6 +79,11 @@ esp_err_t voice_session_start(void)
 
 void voice_session_stop(void)
 {
+}
+
+void voice_session_set_event_queue(QueueHandle_t queue)
+{
+    (void)queue;
 }
 
 #endif /* CONFIG_VOICE_SESSION_ENABLE */
