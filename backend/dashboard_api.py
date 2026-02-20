@@ -1,6 +1,7 @@
 """
 Dashboard API for AuraBot development.
 Serves status, session history, control, and config over HTTP.
+Request logging goes to a file only (no console); high-frequency polls (e.g. /api/status) are skipped to reduce noise.
 """
 
 import os
@@ -9,6 +10,7 @@ import time
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request, HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -17,6 +19,30 @@ from pydantic import BaseModel
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_BACKEND_DIR)
 _DASHBOARD_DIR = os.path.join(_PROJECT_ROOT, "dashboard")
+_DASHBOARD_LOG_DIR = os.path.join(_PROJECT_ROOT, "logs")
+_DASHBOARD_ACCESS_LOG = os.path.join(_DASHBOARD_LOG_DIR, "dashboard_requests.log")
+
+# Paths we skip logging (high-frequency polling) to avoid repeated lines in the log file
+_SKIP_LOG_PATHS = frozenset({"/api/status"})
+
+
+class DashboardRequestLogMiddleware(BaseHTTPMiddleware):
+    """Log dashboard API requests to a file only. Skips high-frequency paths to reduce noise."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path in _SKIP_LOG_PATHS:
+            return response
+        try:
+            os.makedirs(_DASHBOARD_LOG_DIR, exist_ok=True)
+            with open(_DASHBOARD_ACCESS_LOG, "a", encoding="utf-8") as f:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                client = request.client.host if request.client else "-"
+                f.write(f"{ts} {client} {request.method} {path} {response.status_code}\n")
+        except OSError:
+            pass
+        return response
 
 
 def _get_aurabot(request: Request):
@@ -89,6 +115,7 @@ def create_app(aurabot: Optional[Any] = None) -> FastAPI:
     app = FastAPI(title="AuraBot Dashboard", version="0.1.0")
     if aurabot is not None:
         app.state.aurabot = aurabot
+    app.add_middleware(DashboardRequestLogMiddleware)
 
     @app.get("/api/status")
     def api_status(request: Request):
@@ -187,7 +214,8 @@ def run_dashboard(
 
     def _run():
         import uvicorn
-        uvicorn.run(app, host=host, port=port, log_level="warning")
+        # No console access log; requests are logged to logs/dashboard_requests.log (polling paths skipped)
+        uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
