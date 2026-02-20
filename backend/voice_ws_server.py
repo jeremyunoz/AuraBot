@@ -326,7 +326,11 @@ async def voice_websocket(websocket: WebSocket):
 
 def run_voice_server(host: str = "0.0.0.0", port: int = 8765):
     import uvicorn
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    from dashboard_api import UVICORN_LOG_CONFIG_NO_ACCESS
+    uvicorn.run(
+        app, host=host, port=port, log_level="info",
+        access_log=False, log_config=UVICORN_LOG_CONFIG_NO_ACCESS,
+    )
 
 
 if __name__ == "__main__":
