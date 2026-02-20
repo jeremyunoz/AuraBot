@@ -4,6 +4,7 @@ Serves status, session history, control, and config over HTTP.
 Request logging goes to a file only (no console); high-frequency polls (e.g. /api/status) are skipped to reduce noise.
 """
 
+import logging
 import os
 import threading
 import time
@@ -24,6 +25,32 @@ _DASHBOARD_ACCESS_LOG = os.path.join(_DASHBOARD_LOG_DIR, "dashboard_requests.log
 
 # Paths we skip logging (high-frequency polling) to avoid repeated lines in the log file
 _SKIP_LOG_PATHS = frozenset({"/api/status"})
+
+# Uvicorn log config with no access log (no console spam from GET /api/status etc.)
+# Use this for both dashboard and voice server so neither attaches an access handler.
+UVICORN_LOG_CONFIG_NO_ACCESS = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "default": {
+            "()": "uvicorn.logging.DefaultFormatter",
+            "fmt": "%(levelprefix)s %(message)s",
+            "use_colors": None,
+        },
+    },
+    "handlers": {
+        "default": {
+            "formatter": "default",
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stderr",
+        },
+    },
+    "loggers": {
+        "uvicorn": {"handlers": ["default"], "level": "WARNING", "propagate": False},
+        "uvicorn.error": {"handlers": ["default"], "level": "WARNING", "propagate": False},
+        "uvicorn.access": {"handlers": [], "level": "INFO", "propagate": False},
+    },
+}
 
 
 class DashboardRequestLogMiddleware(BaseHTTPMiddleware):
@@ -214,8 +241,10 @@ def run_dashboard(
 
     def _run():
         import uvicorn
-        # No console access log; requests are logged to logs/dashboard_requests.log (polling paths skipped)
-        uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False)
+        uvicorn.run(
+            app, host=host, port=port, log_level="warning",
+            access_log=False, log_config=UVICORN_LOG_CONFIG_NO_ACCESS,
+        )
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
