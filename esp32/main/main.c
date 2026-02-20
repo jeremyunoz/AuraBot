@@ -47,6 +47,7 @@ typedef enum {
 static QueueHandle_t s_evt_queue = NULL;
 static EventGroupHandle_t s_pir_evt = NULL;
 static EventGroupHandle_t s_ready_evt = NULL;  /* used in enter_waking: PIR + WS ready */
+static volatile bool s_ready_cancelled = false; /* set before delete so pir_warmup_task skips SetBits */
 static sys_state_t s_state = SYS_STATE_IDLE;
 static bool s_pir_configured = false;
 
@@ -159,6 +160,17 @@ static void enter_sleeping(void)
     ESP_LOGI(TAG, "State -> %s", state_to_str(s_state));
 }
 
+/* Call before deleting s_ready_evt so pir_warmup_task (if still in delay) won't touch it after free. */
+static void delete_ready_evt_safe(void)
+{
+    s_ready_cancelled = true;
+    vTaskDelay(pdMS_TO_TICKS(50)); /* let pir_warmup_task wake, see flag, and exit without SetBits */
+    if (s_ready_evt) {
+        vEventGroupDelete(s_ready_evt);
+        s_ready_evt = NULL;
+    }
+}
+
 #if CONFIG_VOICE_SESSION_ENABLE
 static void ws_ready_cb(void *arg)
 {
@@ -173,9 +185,12 @@ static void pir_warmup_task(void *arg)
 {
     EventGroupHandle_t ready = (EventGroupHandle_t)arg;
     vTaskDelay(pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS));
-    if (ready) {
-        xEventGroupSetBits(ready, READY_PIR_BIT);
+    /* Skip SetBits if main already timed out and deleted/freed the event group (avoids use-after-free panic). */
+    if (s_ready_cancelled || !ready) {
+        vTaskDelete(NULL);
+        return;
     }
+    xEventGroupSetBits(ready, READY_PIR_BIT);
     vTaskDelete(NULL);
 }
 
@@ -198,6 +213,7 @@ static void enter_waking(void)
     ESP_LOGI(TAG, "WiFi connected");
 
     /* Event group for "ready": PIR warmup and WebSocket connected (both in parallel with MQTT) */
+    s_ready_cancelled = false;
     s_ready_evt = xEventGroupCreate();
     if (!s_ready_evt) {
         ESP_LOGE(TAG, "Failed to create ready event group");
@@ -222,8 +238,7 @@ static void enter_waking(void)
 #if CONFIG_MQTT_ENABLE
     if (mqtt_start() != ESP_OK) {
         ESP_LOGE(TAG, "MQTT start failed");
-        vEventGroupDelete(s_ready_evt);
-        s_ready_evt = NULL;
+        delete_ready_evt_safe();
         enter_sleeping();
         return;
     }
@@ -235,8 +250,7 @@ static void enter_waking(void)
     }
     if (!mqtt_is_connected()) {
         ESP_LOGE(TAG, "MQTT connect timeout");
-        vEventGroupDelete(s_ready_evt);
-        s_ready_evt = NULL;
+        delete_ready_evt_safe();
         enter_sleeping();
         return;
     }
@@ -257,8 +271,7 @@ static void enter_waking(void)
     esp_err_t start_err = voice_session_start();
     if (start_err != ESP_OK) {
         ESP_LOGE(TAG, "voice_session_start failed %s", esp_err_to_name(start_err));
-        vEventGroupDelete(s_ready_evt);
-        s_ready_evt = NULL;
+        delete_ready_evt_safe();
         enter_sleeping();
         return;
     }
@@ -271,8 +284,7 @@ static void enter_waking(void)
         pdTRUE,
         pdMS_TO_TICKS(READY_BOTH_TIMEOUT_MS)
     );
-    vEventGroupDelete(s_ready_evt);
-    s_ready_evt = NULL;
+    delete_ready_evt_safe();
 
     if ((bits & (READY_PIR_BIT | READY_WS_BIT)) != (READY_PIR_BIT | READY_WS_BIT)) {
         ESP_LOGE(TAG, "Timeout waiting for PIR warmup + WebSocket (got 0x%lx)", (unsigned long)bits);
@@ -290,8 +302,7 @@ static void enter_waking(void)
         pdTRUE,
         pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS + 2000)
     );
-    vEventGroupDelete(s_ready_evt);
-    s_ready_evt = NULL;
+    delete_ready_evt_safe();
     if ((bits & READY_PIR_BIT) == 0) {
         ESP_LOGE(TAG, "Timeout waiting for PIR warmup");
         enter_sleeping();
