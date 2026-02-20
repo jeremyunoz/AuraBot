@@ -4,6 +4,11 @@
  *
  * Listen phase: encode + send mic; ignore incoming TTS.
  * Speak phase: decode + play TTS; don't send mic.
+ *
+ * Design aligned with xiaozhi-esp32 audio service (github.com/78/xiaozhi-esp32/main/audio):
+ * - Separate tasks for encode, decode, playback; decode queue + playback stream.
+ * - Opus APPLICATION_AUDIO for encoder (uplink); server uses audio + higher bitrate for TTS (downlink).
+ * - Decoder reset and playback flush on tts_start to avoid cross-burst artifacts.
  */
 
 #include "voice/voice_conversation.h"
@@ -31,14 +36,14 @@ static const char *TAG = "voice_conversation";
 #define FRAME_BYTES         (FRAME_SAMPLES * sizeof(int16_t))
 #define OPUS_MAX_PACKET     1275
 #define PCM_BUF_SIZE        (FRAME_BYTES * 2)
-#define PLAYBACK_BUF_SIZE   (FRAME_BYTES * 4)
+#define PLAYBACK_BUF_SIZE   (FRAME_BYTES * 8)   /* 8 frames ~480 ms; smooth TTS playback (xiaozhi-style) */
 #define ENCODER_TASK_STACK  24576
 #define ENCODER_TASK_PRIO   5
 #define PLAYBACK_TASK_STACK 2560
 #define PLAYBACK_TASK_PRIO  6
 #define DECODER_TASK_STACK  12288
 #define DECODER_TASK_PRIO   5
-#define DECODER_QUEUE_LEN   8
+#define DECODER_QUEUE_LEN   24  /* enough headroom for TTS burst (xiaozhi uses ~40 for decode queue) */
 #define SPEAK_TO_LISTEN_MS  500
 #define ENCODER_RECV_TICKS  pdMS_TO_TICKS(60)
 #define ENCODER_SEND_TICKS  pdMS_TO_TICKS(80)
@@ -100,6 +105,13 @@ static void on_ws_data(void *arg, const uint8_t *data, size_t len, bool is_binar
                     ESP_LOGI(TAG, "Server hello received");
                 } else if (strcmp(type->valuestring, "tts_start") == 0) {
                     s_phase = VOICE_PHASE_SPEAK;
+                    /* Reset decoder and flush playback so each TTS burst starts clean (xiaozhi ResetDecoder-style) */
+                    if (s_opus_dec) {
+                        opus_decoder_ctl(s_opus_dec, OPUS_RESET_STATE);
+                    }
+                    if (s_playback_stream) {
+                        xStreamBufferReset(s_playback_stream);
+                    }
                     ESP_LOGD(TAG, "Phase -> SPEAK (tts_start)");
                 } else if (strcmp(type->valuestring, "tts_end") == 0) {
                     s_phase = VOICE_PHASE_LISTEN;
@@ -277,7 +289,8 @@ esp_err_t voice_conversation_start(const char *uri)
     }
 
     int err = 0;
-    s_opus_enc = opus_encoder_create(SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_VOIP, &err);
+    /* APPLICATION_AUDIO for uplink (like xiaozhi ESP_OPUS_ENC_APPLICATION_AUDIO); server uses audio+64k for TTS downlink */
+    s_opus_enc = opus_encoder_create(SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_AUDIO, &err);
     if (!s_opus_enc || err != OPUS_OK) {
         ESP_LOGE(TAG, "opus_encoder_create failed %d", err);
         return ESP_FAIL;
