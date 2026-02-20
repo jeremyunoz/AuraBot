@@ -15,6 +15,7 @@
 
 #include <string.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -286,6 +287,7 @@ esp_err_t voice_conversation_start(const char *uri)
     voice_ws_set_data_callback(on_ws_data, NULL);
     voice_ws_set_disconnect_callback(on_ws_disconnect, NULL);
 
+    ESP_LOGI(TAG, "[T+%lld ms] voice_ws_start(%s) calling", (long long)(esp_timer_get_time() / 1000), uri);
     esp_err_t ret = voice_ws_start(uri);
     if (ret != ESP_OK) {
         opus_encoder_destroy(s_opus_enc);

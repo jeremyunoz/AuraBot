@@ -10,6 +10,7 @@
 
 #include <string.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_websocket_client.h"
 
 static const char *TAG = "voice_ws";
@@ -34,7 +35,7 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
 
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "WebSocket connected");
+        ESP_LOGI(TAG, "[T+%lld ms] WebSocket connected", (long long)(esp_timer_get_time() / 1000));
         if (evt->client) {
             int sent = esp_websocket_client_send_text(s_ws_client, HELLO_JSON,
                 sizeof(HELLO_JSON) - 1, pdMS_TO_TICKS(1000));

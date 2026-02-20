@@ -166,6 +166,8 @@ menu "AuraBot Configuration"
             default "ws://pi5.local:8765/voice"
             help
                 URI for the Pi5 WebSocket voice server (e.g. ws://host:port/path).
+                Using pi5.local requires mDNS resolution and can add 1-3+ seconds to
+                connect. For faster connect use the Pi's IP: ws://192.168.x.x:8765/voice.
     endmenu
 
 endmenu

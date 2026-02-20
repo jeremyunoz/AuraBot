@@ -3,6 +3,7 @@
 #include "sdkconfig.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
@@ -157,9 +158,12 @@ static void enter_sleeping(void)
 
 static void enter_waking(void)
 {
+    int64_t t0_ms = esp_timer_get_time() / 1000;
+    ESP_LOGI(TAG, "[T+%lld ms] enter_waking start", (long long)t0_ms);
+
     set_state(SYS_STATE_WAKING);
 
-    ESP_LOGI(TAG, "Starting WiFi station");
+    ESP_LOGI(TAG, "[T+%lld ms] Starting WiFi station", (long long)(esp_timer_get_time() / 1000));
     wifi_sta_cfg_t cfg = {
         .ssid = CONFIG_ESP_WIFI_SSID,
         .password = CONFIG_ESP_WIFI_PASSWORD,
@@ -171,6 +175,7 @@ static void enter_waking(void)
         enter_sleeping();
         return;
     }
+    ESP_LOGI(TAG, "[T+%lld ms] WiFi connected", (long long)(esp_timer_get_time() / 1000));
 
 #if CONFIG_MQTT_ENABLE
     if (mqtt_start() != ESP_OK) {
@@ -189,6 +194,7 @@ static void enter_waking(void)
         enter_sleeping();
         return;
     }
+    ESP_LOGI(TAG, "[T+%lld ms] MQTT connected (waited %d ms)", (long long)(esp_timer_get_time() / 1000), wait_ms);
 
     (void)mqtt_publish(
         "aurabot/status",
@@ -214,6 +220,8 @@ static void enter_waking(void)
     pir_reset_count();
     publish_pir_status("warm");
 
+    ESP_LOGI(TAG, "[T+%lld ms] PIR warmup done, starting ACTIVE (voice_session_start next)",
+             (long long)(esp_timer_get_time() / 1000));
     set_state(SYS_STATE_ACTIVE);
 }
 
