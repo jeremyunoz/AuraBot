@@ -64,6 +64,7 @@ python sim_loop.py
 
 - Starts the voice loop, MQTT integration (if enabled), and web dashboard at http://localhost:8000
 - Use `backend/.env` for `MQTT_HOST`, `MQTT_PORT`, `MQTT_USERNAME`, `MQTT_PASSWORD`
+- **Voice**: By default the ESP32 records sound (WebSocket to Pi); Pi runs ASR/LLM/TTS and sends TTS Opus back. Set `ENABLE_VOICE_WS=false` to use the Pi microphone instead. See "Voice session" below.
 
 ### Presence simulation (no hardware)
 
@@ -104,6 +105,35 @@ For boards with an ES8311 codec (e.g. **ESP32-P4-WIFI6** from Waveshare):
    - Enable **Enable speaker output**
    - Defaults match ESP32-P4-WIFI6 (I2C: 7/8, I2S: 9–13, PA: 53). Adjust for other boards.
 2. Build and flash. On PIR motion, a short beep plays; you can also call `speaker_beep()`, `speaker_write()`, etc. from your code.
+
+### Voice session (Pi5 ↔ ESP32, voice capture on ESP32)
+
+When voice capture is on the ESP32 (not the Pi), the Pi runs a WebSocket voice server: ESP32 sends Opus (60 ms, 16 kHz mono), Pi decodes → ASR → AuraBot (LLM/timers) → TTS → Opus back to ESP32.
+
+1. **On Pi5** (default: voice from ESP32):
+
+   ```bash
+   cd backend
+   python sim_loop.py
+   ```
+   This starts MQTT, dashboard, and the voice WebSocket server on port 8765 (or `VOICE_WS_PORT`). Voice input comes from the ESP32; Pi runs ASR/LLM/TTS and sends TTS Opus back. On first ESP32 connection, the bot sends its greeting as TTS over the WebSocket. To use the Pi microphone instead, run with `ENABLE_VOICE_WS=false`.
+
+2. **Standalone voice server** (no AuraBot, echo only):
+
+   ```bash
+   cd backend
+   python voice_ws_server.py
+   ```
+   Listens on `0.0.0.0:8765`, path `/voice`; replies "You said: …" for testing.
+
+3. **On ESP32**: Enable voice session and set the Pi5 URI:
+
+   - `idf.py menuconfig` → **AuraBot Configuration** → **Voice session (online TTS / Pi5 WebSocket)**:
+     - **Enable voice session (Opus + WebSocket to Pi5)** = Yes
+     - **WebSocket URI for Pi5 voice server** = `ws://pi5.local:8765/voice` (or your Pi5 hostname/IP)
+   - Or in `esp32/sdkconfig.defaults`: set `CONFIG_VOICE_SESSION_ENABLE=y` and `CONFIG_VOICE_WS_URI="ws://<host>:8765/voice"`.
+
+4. **Test**: Put the device in ACTIVE state (e.g. wake + start session). ESP32 connects, gets server hello and the greeting TTS, then streams mic Opus. Pi runs ASR → LLM/timers → TTS Opus back to ESP32.
 
 ### How it works
 

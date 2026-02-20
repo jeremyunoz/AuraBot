@@ -19,6 +19,7 @@ numpy==1.24.2
 PyAudio==0.2.14
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+opuslib>=3.0.0
 ultralytics>=8.0.0
 # opencv-python-headless pinned to version compatible with numpy 1.24.2 (required for picamera2)
 opencv-python-headless==4.8.1.78

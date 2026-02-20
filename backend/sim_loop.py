@@ -135,11 +135,10 @@ class AuraBot:
         self._vision_ready_event = None
         self._is_running = False
     
-    def start(self):
-        """Start the chatbot conversation."""
+    def start_services(self):
+        """Start MQTT and vision only (no Pi mic / no conversation loop). Use when voice input is from ESP32 via WebSocket."""
         self._is_running = True
-        
-        # Start MQTT integration if enabled
+
         if self.mqtt_integration:
             try:
                 self.mqtt_integration.start()
@@ -166,7 +165,10 @@ class AuraBot:
                         self.logger.log_general("Vision initialization timeout - continuing anyway", "WARNING")
             except Exception as e:
                 self.logger.log_error(f"Vision integration failed to start: {e}")
-        
+
+    def start(self):
+        """Start the chatbot conversation (Pi mic → STT → response → TTS)."""
+        self.start_services()
         self._speak_safely(self.greeting)
         self._run_conversation_loop()
     
@@ -388,6 +390,8 @@ def main():
     Configuration via environment variables:
     - ENABLE_MQTT: Set to "false" to disable MQTT (default: enabled)
     - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
+    - ENABLE_VOICE_WS: Set to "false" to use Pi microphone instead of ESP32 (default: true = ESP32 records sound via WebSocket). When true, Pi runs the voice WebSocket server; ESP32 sends Opus, Pi runs ASR/LLM/TTS and sends TTS Opus back.
+    - VOICE_WS_PORT: Port for the voice WebSocket server (default: 8765)
     - ENABLE_LLM: Set to "false" to disable Gemini conversation (default: enabled)
     - GEMINI_API_KEY: Google AI API key for Gemini (required when LLM is enabled)
     - GEMINI_MODEL: Gemini model identifier (default: gemini-2.5-flash)
@@ -398,7 +402,9 @@ def main():
     # Check MQTT enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
     enable_vision = os.getenv("ENABLE_VISION", "false").lower() == "true"
-    
+    enable_voice_ws = os.getenv("ENABLE_VOICE_WS", "true").lower() != "false"
+    voice_ws_port = int(os.getenv("VOICE_WS_PORT", "8765"))
+
     # LLM configuration
     enable_llm = os.getenv("ENABLE_LLM", "true").lower() != "false"
     gemini_api_key = os.getenv("GEMINI_API_KEY")
@@ -447,7 +453,7 @@ def main():
     
     if enable_vision:
         bot.logger.log_general("Vision (camera) enabled for presence detection", "INFO")
-    
+
     # Start dashboard in background thread
     dashboard_port = int(os.getenv("DASHBOARD_PORT", "8000"))
     dashboard_thread = run_dashboard(bot, host="0.0.0.0", port=dashboard_port)
@@ -456,9 +462,24 @@ def main():
         "INFO",
         metadata={"port": dashboard_port, "local_url": f"http://localhost:{dashboard_port}"}
     )
-    
-    # Start the main AuraBot conversation loop (blocks)
-    bot.start()
+
+    if enable_voice_ws:
+        # Voice capture on ESP32: start services only, then run voice WebSocket server (no Pi mic loop)
+        try:
+            from voice_ws_server import app as voice_ws_app, run_voice_server
+        except ImportError:
+            from backend.voice_ws_server import app as voice_ws_app, run_voice_server
+        bot.start_services()
+        voice_ws_app.state.aurabot = bot
+        bot.logger.log_general(
+            f"Voice WebSocket server enabled (ESP32 voice capture) at ws://0.0.0.0:{voice_ws_port}/voice",
+            "INFO",
+            metadata={"port": voice_ws_port},
+        )
+        run_voice_server(host="0.0.0.0", port=voice_ws_port)
+    else:
+        # Pi mic: full conversation loop (STT on Pi → response → TTS)
+        bot.start()
 
 
 if __name__ == "__main__":
