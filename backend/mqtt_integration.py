@@ -26,8 +26,11 @@ except ImportError:
 
 class TTSWithMQTT:
     """
-    TTS wrapper that publishes text to MQTT (aurabot/tts/speak) for the device
-    (e.g. ESP32) to speak. Pi does not play TTS locally when speaker is on ESP32.
+    **DEPRECATED.** TTS-over-MQTT path is no longer used; voice output uses the
+    Voice WebSocket (Pi synthesizes and sends Opus to ESP32) instead.
+
+    Legacy: TTS wrapper that publishes text to MQTT (aurabot/tts/speak) for the
+    device (e.g. ESP32) to speak. Pi does not play TTS locally when speaker is on ESP32.
     """
 
     def __init__(self, tts_engine, mqtt_integration: "MQTTIntegration"):
@@ -169,7 +172,7 @@ class MQTTIntegration:
                     if "esp32" in msg.topic or (isinstance(data, dict) and "esp32" in data) or "esp32" in payload:
                         self.mqtt_api.record_esp32_message_received()
                 elif msg.topic == "aurabot/tts/speak":
-                    # Backend publishes here for ESP32; ignore when we receive our own or echoes (no action)
+                    # Deprecated: TTS-over-MQTT path; backend used to publish here for ESP32 (no action)
                     pass
                 elif msg.topic == "aurabot/tts/ack":
                     response = self.mqtt_api.handle_tts_ack(data)
@@ -298,6 +301,8 @@ class MQTTIntegration:
 
     def publish_tts(self, text: str, qos: int = 1) -> bool:
         """
+        **DEPRECATED.** TTS-over-MQTT is no longer used; use Voice WebSocket for TTS.
+
         Publish TTS text to aurabot/tts/speak for the device (e.g. ESP32) to speak.
         
         Args:

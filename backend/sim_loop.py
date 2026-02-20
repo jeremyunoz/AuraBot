@@ -75,7 +75,7 @@ class AuraBot:
         # Initialize STT (Pi does STT; TTS is on ESP32 via MQTT)
         self.stt = STT()
 
-        # Initialize TTS (raw engine; may wrap with TTSWithMQTT when MQTT is enabled)
+        # Initialize TTS (raw engine; may wrap with deprecated TTSWithMQTT when MQTT is enabled)
         self._tts_engine_raw = TTS()
         self._tts_engine_raw.style()
         self.tts_engine = self._tts_engine_raw
@@ -106,7 +106,7 @@ class AuraBot:
             custom_responses, self.timer_manager, llm_client=llm_client
         )
 
-        # Initialize MQTT integration (optional); when enabled, TTS also publishes to aurabot/tts/speak
+        # Initialize MQTT integration (optional). DEPRECATED: TTS-over-MQTT (aurabot/tts/speak) is no longer used; voice uses WebSocket TTS.
         self.mqtt_api: Optional[MQTTAPI] = None
         self.mqtt_integration: Optional[MQTTIntegration] = None
 
@@ -120,7 +120,7 @@ class AuraBot:
                     logger=self.logger
                 )
                 self.mqtt_integration = MQTTIntegration(self.mqtt_api)
-                # Pi does STT only; TTS is on ESP32. Wrap TTS so speak() publishes to aurabot/tts/speak (no local playback).
+                # DEPRECATED: TTSWithMQTT publishes to aurabot/tts/speak; prefer Voice WebSocket for TTS.
                 self.tts_engine = TTSWithMQTT(self._tts_engine_raw, self.mqtt_integration)
                 # Point all TTS users at the wrapper: conversation loop, TimerManager, MQTTAPI, WellnessTimerTrigger
                 self.timer_manager.tts_engine = self.tts_engine

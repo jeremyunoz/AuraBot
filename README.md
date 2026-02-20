@@ -229,10 +229,12 @@ AuraBot/
 
 ### MQTT & Dashboard
 
+**Note:** The **Voice/TTS-over-MQTT** path (`aurabot/tts/speak`) is **deprecated**. Voice output now uses the Voice WebSocket (Pi synthesizes TTS and sends Opus to ESP32). MQTT remains used for sensors, control, and dashboard.
+
 | Module | Description |
 |--------|-------------|
 | `mqtt_api.py` | Handles `aurabot/sensors` and `aurabot/control`; presence debounce; wellness trigger |
-| `mqtt_integration.py` | MQTT client factory, lifecycle, topic subscription |
+| `mqtt_integration.py` | MQTT client factory, lifecycle, topic subscription (TTSWithMQTT / `aurabot/tts/speak` deprecated) |
 | `dashboard_api.py` | FastAPI: `/api/status`, `/api/sessions`, `/api/control`, `/api/config` |
 
 ### ESP32

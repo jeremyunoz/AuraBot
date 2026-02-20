@@ -41,6 +41,7 @@ static bool topic_equals(const esp_mqtt_event_handle_t event, const char *topic)
     return (event->topic_len == (int)topic_len) && (strncmp(event->topic, topic, topic_len) == 0);
 }
 
+/* Deprecated: TTS-over-MQTT path; voice output now uses Voice WebSocket (Pi sends Opus). */
 static void handle_tts_speak(const esp_mqtt_event_handle_t event)
 {
     if (!event || !event->data || event->data_len <= 0) return;
@@ -146,7 +147,7 @@ static void mqtt_event_handler(void *arg,
 
         // Subscribe to your control topic here
         esp_mqtt_client_subscribe(client, "aurabot/control", 1);
-        esp_mqtt_client_subscribe(client, "aurabot/tts/speak", 1);
+        esp_mqtt_client_subscribe(client, "aurabot/tts/speak", 1); /* deprecated: TTS now via Voice WS */
         mqtt_post_event(SYS_EVT_MQTT_UP);
         break;
 
