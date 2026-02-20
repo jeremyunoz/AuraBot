@@ -10,7 +10,6 @@
 
 #include <string.h>
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "esp_websocket_client.h"
 
 static const char *TAG = "voice_ws";
@@ -26,6 +25,8 @@ static voice_ws_data_cb_t s_data_cb;
 static void *s_data_cb_arg;
 static voice_ws_disconnect_cb_t s_disconnect_cb;
 static void *s_disconnect_cb_arg;
+static voice_ws_connected_cb_t s_connected_cb;
+static void *s_connected_cb_arg;
 
 static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -35,7 +36,10 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
 
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "[T+%lld ms] WebSocket connected", (long long)(esp_timer_get_time() / 1000));
+        ESP_LOGI(TAG, "WebSocket connected");
+        if (s_connected_cb) {
+            s_connected_cb(s_connected_cb_arg);
+        }
         if (evt->client) {
             int sent = esp_websocket_client_send_text(s_ws_client, HELLO_JSON,
                 sizeof(HELLO_JSON) - 1, pdMS_TO_TICKS(1000));
@@ -77,6 +81,12 @@ void voice_ws_set_disconnect_callback(voice_ws_disconnect_cb_t cb, void *arg)
 {
     s_disconnect_cb = cb;
     s_disconnect_cb_arg = arg;
+}
+
+void voice_ws_set_connected_callback(voice_ws_connected_cb_t cb, void *arg)
+{
+    s_connected_cb = cb;
+    s_connected_cb_arg = arg;
 }
 
 esp_err_t voice_ws_start(const char *uri)
@@ -130,6 +140,8 @@ void voice_ws_stop(void)
     s_data_cb_arg = NULL;
     s_disconnect_cb = NULL;
     s_disconnect_cb_arg = NULL;
+    s_connected_cb = NULL;
+    s_connected_cb_arg = NULL;
 }
 
 bool voice_ws_is_connected(void)
@@ -153,6 +165,7 @@ int voice_ws_send_bin(const void *data, size_t len, TickType_t timeout_ticks)
 
 void voice_ws_set_data_callback(voice_ws_data_cb_t cb, void *arg) { (void)cb; (void)arg; }
 void voice_ws_set_disconnect_callback(voice_ws_disconnect_cb_t cb, void *arg) { (void)cb; (void)arg; }
+void voice_ws_set_connected_callback(voice_ws_connected_cb_t cb, void *arg) { (void)cb; (void)arg; }
 esp_err_t voice_ws_start(const char *uri) { (void)uri; return ESP_ERR_NOT_SUPPORTED; }
 void voice_ws_stop(void) { }
 bool voice_ws_is_connected(void) { return false; }

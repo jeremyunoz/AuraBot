@@ -3,7 +3,6 @@
 #include "sdkconfig.h"
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
@@ -25,6 +24,7 @@
 #include "display/lcd_lvgl.h"
 #include "display/robot_eyes.h"
 #include "voice/voice_session.h"
+#include "voice/voice_ws.h"
 
 static const char *TAG = "main";
 
@@ -35,13 +35,18 @@ typedef enum {
     SYS_STATE_SLEEPING
 } sys_state_t;
 
-#define STATE_TASK_STACK_SIZE  4096
-#define PIR_TASK_STACK_SIZE    4096
-#define EVT_QUEUE_LEN          10
-#define PIR_EVENT_BIT          BIT0
+#define STATE_TASK_STACK_SIZE    4096
+#define PIR_TASK_STACK_SIZE     4096
+#define PIR_WARMUP_TASK_STACK   1536
+#define EVT_QUEUE_LEN           10
+#define PIR_EVENT_BIT           BIT0
+#define READY_PIR_BIT           BIT1
+#define READY_WS_BIT            BIT2
+#define READY_BOTH_TIMEOUT_MS   20000
 
 static QueueHandle_t s_evt_queue = NULL;
 static EventGroupHandle_t s_pir_evt = NULL;
+static EventGroupHandle_t s_ready_evt = NULL;  /* used in enter_waking: PIR + WS ready */
 static sys_state_t s_state = SYS_STATE_IDLE;
 static bool s_pir_configured = false;
 
@@ -103,9 +108,7 @@ static void set_state(sys_state_t state)
     action_post(sys_to_action(state));
     action_set_user_control(state == SYS_STATE_ACTIVE);
     publish_state(state);
-    if (state == SYS_STATE_ACTIVE) {
-        (void)voice_session_start();
-    }
+    /* Voice session is started in enter_waking() (parallel with PIR warmup); not here */
     ESP_LOGI(TAG, "State -> %s", state_to_str(state));
 }
 
@@ -156,14 +159,31 @@ static void enter_sleeping(void)
     ESP_LOGI(TAG, "State -> %s", state_to_str(s_state));
 }
 
+#if CONFIG_VOICE_SESSION_ENABLE
+static void ws_ready_cb(void *arg)
+{
+    (void)arg;
+    if (s_ready_evt) {
+        xEventGroupSetBits(s_ready_evt, READY_WS_BIT);
+    }
+}
+#endif
+
+static void pir_warmup_task(void *arg)
+{
+    EventGroupHandle_t ready = (EventGroupHandle_t)arg;
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS));
+    if (ready) {
+        xEventGroupSetBits(ready, READY_PIR_BIT);
+    }
+    vTaskDelete(NULL);
+}
+
 static void enter_waking(void)
 {
-    int64_t t0_ms = esp_timer_get_time() / 1000;
-    ESP_LOGI(TAG, "[T+%lld ms] enter_waking start", (long long)t0_ms);
-
     set_state(SYS_STATE_WAKING);
 
-    ESP_LOGI(TAG, "[T+%lld ms] Starting WiFi station", (long long)(esp_timer_get_time() / 1000));
+    ESP_LOGI(TAG, "Starting WiFi station");
     wifi_sta_cfg_t cfg = {
         .ssid = CONFIG_ESP_WIFI_SSID,
         .password = CONFIG_ESP_WIFI_PASSWORD,
@@ -175,11 +195,35 @@ static void enter_waking(void)
         enter_sleeping();
         return;
     }
-    ESP_LOGI(TAG, "[T+%lld ms] WiFi connected", (long long)(esp_timer_get_time() / 1000));
+    ESP_LOGI(TAG, "WiFi connected");
+
+    /* Event group for "ready": PIR warmup and WebSocket connected (both in parallel with MQTT) */
+    s_ready_evt = xEventGroupCreate();
+    if (!s_ready_evt) {
+        ESP_LOGE(TAG, "Failed to create ready event group");
+        enter_sleeping();
+        return;
+    }
+    xEventGroupClearBits(s_ready_evt, READY_PIR_BIT | READY_WS_BIT);
+
+    /* PIR hardware + start warmup task (runs in parallel from here) */
+    if (!s_pir_evt) {
+        s_pir_evt = xEventGroupCreate();
+    }
+    if (s_pir_evt && !s_pir_configured) {
+        pir_t pir = { .pin = (gpio_num_t)CONFIG_PIR_GPIO };
+        if (pir_int_interrupt(&pir, s_pir_evt, PIR_EVENT_BIT) == ESP_OK) {
+            s_pir_configured = true;
+        }
+    }
+    xTaskCreate(pir_warmup_task, "pir_warmup", PIR_WARMUP_TASK_STACK, s_ready_evt, 4, NULL);
+    ESP_LOGI(TAG, "PIR warmup started (parallel)");
 
 #if CONFIG_MQTT_ENABLE
     if (mqtt_start() != ESP_OK) {
         ESP_LOGE(TAG, "MQTT start failed");
+        vEventGroupDelete(s_ready_evt);
+        s_ready_evt = NULL;
         enter_sleeping();
         return;
     }
@@ -191,10 +235,12 @@ static void enter_waking(void)
     }
     if (!mqtt_is_connected()) {
         ESP_LOGE(TAG, "MQTT connect timeout");
+        vEventGroupDelete(s_ready_evt);
+        s_ready_evt = NULL;
         enter_sleeping();
         return;
     }
-    ESP_LOGI(TAG, "[T+%lld ms] MQTT connected (waited %d ms)", (long long)(esp_timer_get_time() / 1000), wait_ms);
+    ESP_LOGI(TAG, "MQTT connected (waited %d ms)");
 
     (void)mqtt_publish(
         "aurabot/status",
@@ -206,22 +252,56 @@ static void enter_waking(void)
     ESP_LOGI(TAG, "MQTT disabled (voice-session-only test)");
 #endif
 
-    if (!s_pir_evt) {
-        s_pir_evt = xEventGroupCreate();
+#if CONFIG_VOICE_SESSION_ENABLE
+    voice_ws_set_connected_callback(ws_ready_cb, NULL);
+    esp_err_t start_err = voice_session_start();
+    if (start_err != ESP_OK) {
+        ESP_LOGE(TAG, "voice_session_start failed %s", esp_err_to_name(start_err));
+        vEventGroupDelete(s_ready_evt);
+        s_ready_evt = NULL;
+        enter_sleeping();
+        return;
     }
-    if (s_pir_evt && !s_pir_configured) {
-        pir_t pir = { .pin = (gpio_num_t)CONFIG_PIR_GPIO };
-        if (pir_int_interrupt(&pir, s_pir_evt, PIR_EVENT_BIT) == ESP_OK) {
-            s_pir_configured = true;
-        }
-    }
+    ESP_LOGI(TAG, "voice_session_start done, waiting for PIR + WebSocket ready");
 
-    vTaskDelay(pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS));
+    EventBits_t bits = xEventGroupWaitBits(
+        s_ready_evt,
+        READY_PIR_BIT | READY_WS_BIT,
+        pdTRUE,
+        pdTRUE,
+        pdMS_TO_TICKS(READY_BOTH_TIMEOUT_MS)
+    );
+    vEventGroupDelete(s_ready_evt);
+    s_ready_evt = NULL;
+
+    if ((bits & (READY_PIR_BIT | READY_WS_BIT)) != (READY_PIR_BIT | READY_WS_BIT)) {
+        ESP_LOGE(TAG, "Timeout waiting for PIR warmup + WebSocket (got 0x%lx)", (unsigned long)bits);
+        voice_session_stop();
+        enter_sleeping();
+        return;
+    }
+    ESP_LOGI(TAG, "PIR warmup + WebSocket ready, going ACTIVE");
+#else
+    /* No voice session: wait only for PIR warmup */
+    EventBits_t bits = xEventGroupWaitBits(
+        s_ready_evt,
+        READY_PIR_BIT,
+        pdTRUE,
+        pdTRUE,
+        pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS + 2000)
+    );
+    vEventGroupDelete(s_ready_evt);
+    s_ready_evt = NULL;
+    if ((bits & READY_PIR_BIT) == 0) {
+        ESP_LOGE(TAG, "Timeout waiting for PIR warmup");
+        enter_sleeping();
+        return;
+    }
+    ESP_LOGI(TAG, "PIR warmup ready, going ACTIVE");
+#endif
+
     pir_reset_count();
     publish_pir_status("warm");
-
-    ESP_LOGI(TAG, "[T+%lld ms] PIR warmup done, starting ACTIVE (voice_session_start next)",
-             (long long)(esp_timer_get_time() / 1000));
     set_state(SYS_STATE_ACTIVE);
 }
 

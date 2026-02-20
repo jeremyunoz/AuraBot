@@ -23,11 +23,17 @@ typedef void (*voice_ws_data_cb_t)(void *arg, const uint8_t *data, size_t len, b
 /** Callback when WebSocket disconnects or errors */
 typedef void (*voice_ws_disconnect_cb_t)(void *arg);
 
+/** Callback when WebSocket is connected (once per connection) */
+typedef void (*voice_ws_connected_cb_t)(void *arg);
+
 /** Set callback for incoming data; called from WS task context */
 void voice_ws_set_data_callback(voice_ws_data_cb_t cb, void *arg);
 
 /** Set callback for disconnect/error; called from WS task context */
 void voice_ws_set_disconnect_callback(voice_ws_disconnect_cb_t cb, void *arg);
+
+/** Set callback for connected; called from WS task context when WEBSOCKET_EVENT_CONNECTED */
+void voice_ws_set_connected_callback(voice_ws_connected_cb_t cb, void *arg);
 
 /** Start WebSocket client (connect to URI, send hello on connect) */
 esp_err_t voice_ws_start(const char *uri);
