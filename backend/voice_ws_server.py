@@ -1,6 +1,12 @@
 """
 Voice WebSocket server for Pi5: receive Opus from ESP32 → decode → ASR → AuraBot response → TTS Opus → ESP32.
 
+TTS strategy:
+- When ESP32 is connected (voice WebSocket up): use online TTS (gTTS) and send audio frames over the WebSocket.
+- When the Pi5–ESP32 connection is down: TTS is sent as text via MQTT (aurabot/tts/speak) so the ESP32 can
+  speak using offline TTS (picoTTS) when it reconnects. Offline TTS (espeak) is only used as fallback if
+  online TTS fails (e.g. no network) or when the voice client is disconnected.
+
 When integrated with AuraBot (app.state.aurabot set), transcripts are passed to the bot's response handler
 (LLM, timers, exit) and the reply is sent as TTS over the same WebSocket. Otherwise echoes "You said: ...".
 
@@ -19,8 +25,10 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import subprocess
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, WebSocket
@@ -65,15 +73,94 @@ TTS_END_MSG = json.dumps({"type": "tts_end"})
 # Thread pool for blocking ASR/TTS
 _executor = ThreadPoolExecutor(max_workers=2)
 
+# Voice WebSocket connection state: when True, ESP32 is connected and we send TTS as audio (online).
+# When False, TTS should go via MQTT as text (offline TTS on ESP32).
+_voice_client_connected = False
+_voice_client_connected_lock = threading.Lock()
+# Queue for TTS text from timer/wellness etc.; drained by voice WS and sent as online TTS audio.
+_pending_text_tts_queue = None  # queue.Queue, created when server runs
 
-def _tts_to_pcm_16k(text: str) -> bytes:
-    """Synthesize text to 16 kHz mono 16-bit PCM using espeak-ng + sox/ffmpeg."""
+
+def _get_pending_text_tts_queue():
+    """Lazy-init thread-safe queue for TTS text from external callers (timer, wellness)."""
+    global _pending_text_tts_queue
+    if _pending_text_tts_queue is None:
+        _pending_text_tts_queue = queue.Queue()
+    return _pending_text_tts_queue
+
+
+def is_voice_client_connected() -> bool:
+    """True when an ESP32 is connected via the voice WebSocket (Pi5–ESP32 link up)."""
+    with _voice_client_connected_lock:
+        return _voice_client_connected
+
+
+def enqueue_tts_text(text: str) -> bool:
+    """
+    Queue text for online TTS and send as audio over the voice WebSocket.
+    Call this when ESP32 is connected; when disconnected, use MQTT (offline TTS) instead.
+    Returns True if queued, False if no client connected (caller should use MQTT).
+    """
+    if not text or not text.strip():
+        return False
+    with _voice_client_connected_lock:
+        if not _voice_client_connected:
+            return False
+    _get_pending_text_tts_queue().put_nowait(text)
+    return True
+
+
+def _online_tts_to_pcm_16k(text: str):
+    """
+    Synthesize text to 16 kHz mono 16-bit PCM using online TTS (gTTS → MP3 → ffmpeg).
+    Returns bytes on success, None on failure (e.g. network error).
+    """
+    if not text or not text.strip():
+        return b""
+    try:
+        from gtts import gTTS
+    except ImportError:
+        logger.debug("gTTS not available for online TTS")
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        mp3_path = f.name
+    try:
+        tts = gTTS(text=text, lang="en", slow=False)
+        tts.save(mp3_path)
+        out = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", mp3_path,
+                "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-"
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        return out.stdout
+    except FileNotFoundError as e:
+        logger.warning("Online TTS failed: %s (install ffmpeg and/or check PATH)", e)
+        return None
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode("utf-8", errors="replace").strip() or "(no stderr)"
+        logger.warning("Online TTS failed (ffmpeg): %s; stderr: %s", e, stderr)
+        return None
+    except Exception as e:
+        logger.warning("Online TTS failed (gTTS/network): %s", e)
+        return None
+    finally:
+        try:
+            os.unlink(mp3_path)
+        except OSError:
+            pass
+
+
+def _offline_tts_to_pcm_16k(text: str) -> bytes:
+    """Synthesize text to 16 kHz mono 16-bit PCM using espeak-ng (offline). Used when Pi5–ESP32 link is down."""
     if not text or not text.strip():
         return b""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
     try:
-        # espeak-ng to WAV (Linux/Pi)
         try:
             subprocess.run(
                 ["espeak-ng", "-w", wav_path, "-s", "180", text],
@@ -85,9 +172,8 @@ def _tts_to_pcm_16k(text: str) -> bytes:
             try:
                 subprocess.run(["espeak", "-w", wav_path, "-s", "180", text], check=True, capture_output=True, timeout=30)
             except (FileNotFoundError, subprocess.CalledProcessError):
-                logger.warning("espeak-ng/espeak not available for TTS")
+                logger.warning("espeak-ng/espeak not available for offline TTS")
                 return b""
-        # Convert to 16 kHz mono raw PCM
         try:
             out = subprocess.run(
                 ["sox", wav_path, "-r", str(SAMPLE_RATE), "-c", "1", "-t", "raw", "-"],
@@ -116,7 +202,23 @@ def _tts_to_pcm_16k(text: str) -> bytes:
             os.unlink(wav_path)
         except OSError:
             pass
-    return b""
+
+
+def _tts_to_pcm_16k(text: str, prefer_online: bool = True) -> bytes:
+    """
+    Synthesize text to 16 kHz mono 16-bit PCM.
+    When prefer_online is True (default): try online TTS first; on failure use offline (espeak).
+    When False (e.g. known connection breakdown): use offline TTS only.
+    """
+    if not text or not text.strip():
+        return b""
+    if prefer_online:
+        pcm = _online_tts_to_pcm_16k(text)
+        if pcm:
+            logger.info("TTS: online (gTTS) succeeded")
+            return pcm
+        logger.info("TTS: online (gTTS) failed, using offline espeak on Pi")
+    return _offline_tts_to_pcm_16k(text)
 
 
 def _pcm_to_opus_frames(pcm_bytes: bytes, encoder) -> list:
@@ -202,7 +304,13 @@ async def voice_websocket(websocket: WebSocket):
     # Queue for TTS: main loop enqueues; drain task sends tts_start + frames + tts_end
     pending_tts_queue = asyncio.Queue()
     drain_task = None
+    drain_text_task = None
     exit_requested = False
+
+    def set_voice_connected(connected: bool):
+        global _voice_client_connected
+        with _voice_client_connected_lock:
+            _voice_client_connected = connected
 
     async def drain_tts_queue():
         """Background task: send queued TTS Opus frames to ESP32.
@@ -232,8 +340,33 @@ async def voice_websocket(websocket: WebSocket):
             except Exception as e:
                 logger.debug("drain_tts_queue: %s", e)
 
+    async def drain_text_tts_queue():
+        """Drain thread-safe text TTS queue (timer/wellness): online TTS → Opus → pending_tts_queue."""
+        text_queue = _get_pending_text_tts_queue()
+        while True:
+            try:
+                try:
+                    text = text_queue.get_nowait()
+                except queue.Empty:
+                    text = None
+                if not text:
+                    await asyncio.sleep(0.2)
+                    continue
+                def do_online_tts():
+                    pcm = _tts_to_pcm_16k(text)
+                    return _pcm_to_opus_frames(pcm, encoder) if pcm else []
+                opus_frames = await loop.run_in_executor(_executor, do_online_tts)
+                if opus_frames:
+                    pending_tts_queue.put_nowait(opus_frames)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.debug("drain_text_tts_queue: %s", e)
+
     try:
+        set_voice_connected(True)
         drain_task = asyncio.create_task(drain_tts_queue())
+        drain_text_task = asyncio.create_task(drain_text_tts_queue())
 
         while True:
             data = await websocket.receive_bytes()
@@ -306,6 +439,13 @@ async def voice_websocket(websocket: WebSocket):
     except Exception as e:
         logger.exception("Voice WS: error after %d frames: %s", frame_count, e)
     finally:
+        set_voice_connected(False)
+        if drain_text_task is not None:
+            drain_text_task.cancel()
+            try:
+                await drain_text_task
+            except asyncio.CancelledError:
+                pass
         if drain_task is not None:
             drain_task.cancel()
             try:

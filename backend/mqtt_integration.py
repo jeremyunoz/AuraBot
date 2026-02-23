@@ -4,11 +4,24 @@ Factory-based MQTT client setup and lifecycle management.
 """
 
 import json
+import logging
 import os
 import threading
 from typing import Optional
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
+
+logger = logging.getLogger(__name__)
+
+# Optional voice WebSocket integration: when available, TTS can go over WS (online) instead of MQTT (offline on ESP32).
+try:
+    from voice_ws_server import is_voice_client_connected, enqueue_tts_text
+except ImportError:
+    try:
+        from backend.voice_ws_server import is_voice_client_connected, enqueue_tts_text
+    except ImportError:
+        is_voice_client_connected = lambda: False
+        enqueue_tts_text = lambda _: False
 
 
 class TTSWithMQTT:
@@ -22,11 +35,16 @@ class TTSWithMQTT:
         self._mqtt = mqtt_integration
 
     def speak(self, message: str) -> None:
-        # Only publish to MQTT; ESP32 (or other device) does the actual TTS playback
+        if not message or not message.strip():
+            return
+        # When ESP32 is connected via voice WebSocket: use online TTS and send audio over WS.
+        # When Pi5–ESP32 connection is down: publish text to MQTT so ESP32 can speak via offline TTS (picoTTS).
+        if is_voice_client_connected() and enqueue_tts_text(message):
+            logger.info("TTS: using online (voice WS) → gTTS audio to ESP32")
+            return
+        logger.info("TTS: voice WS not connected → MQTT (ESP32 picoTTS)")
         if self._mqtt.is_connected():
             self._mqtt.publish_tts(message)
-        # Optional: uncomment next line to also speak on Pi (e.g. for debugging)
-        # self._tts.speak(message)
 
     def style(self) -> None:
         if hasattr(self._tts, "style"):
