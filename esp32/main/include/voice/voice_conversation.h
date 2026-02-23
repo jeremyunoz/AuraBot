@@ -48,8 +48,8 @@ typedef enum {
     VOICE_FRAME_DURATION_120_MS = 120,
 } voice_frame_duration_ms_t;
 
-/** Playback buffer duration (ms); ~1.2 s to fit ESP32 heap (xiaozhi-style would use 2400). */
-#define VOICE_PLAYBACK_DURATION_MS   1200
+/** Playback buffer duration (ms) Good to keep for 1200/2400 */
+#define VOICE_PLAYBACK_DURATION_MS   2400
 /** Decode queue capacity duration (ms); xiaozhi MAX_DECODE_PACKETS = 2400/FRAME_MS. */
 #define VOICE_DECODE_QUEUE_DURATION_MS 2400
 

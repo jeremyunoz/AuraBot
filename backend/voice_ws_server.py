@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import queue
+import struct
 import subprocess
 import tempfile
 import threading
@@ -48,8 +49,11 @@ FRAME_SAMPLES = (FRAME_MS * SAMPLE_RATE) // 1000  # 960
 FRAME_BYTES = FRAME_SAMPLES * 2  # 1920 (16-bit)
 # How much PCM to collect before running ASR (~2.5 s)
 UTTERANCE_BYTES = int(SAMPLE_RATE * 2.5 * 2)  # 80_000 bytes
-# TTS Opus: use "audio" + higher bitrate for less harsh playback (voip + low bitrate = metallic)
-OPUS_TTS_BITRATE = 64000  # 64 kbps; default voip can be much lower
+# TTS Opus: use "audio" + higher bitrate for less harsh playback (voip + low bitrate = metallic).
+# 96 kbps reduces ear fatigue; override with env VOICE_OPUS_TTS_BITRATE (e.g. 64000, 96000, 128000).
+OPUS_TTS_BITRATE = int(os.environ.get("VOICE_OPUS_TTS_BITRATE", "96000"))
+# Gentle gain for TTS PCM (1.0 = no change). Slightly < 1 reduces loudness fatigue (e.g. 0.9 = ~-1 dB).
+TTS_PCM_GAIN = float(os.environ.get("VOICE_TTS_PCM_GAIN", "0.95"))
 
 # Optional: opuslib for decode/encode (requires libopus: sudo apt-get install libopus0 libopus-dev)
 try:
@@ -211,11 +215,21 @@ def _tts_to_pcm_16k(text: str, prefer_online: bool = True) -> bytes:
     return _offline_tts_to_pcm_16k(text)
 
 
+def _apply_tts_gain(pcm_bytes: bytes, gain: float) -> bytes:
+    """Apply linear gain to 16-bit mono PCM. Clips to int16 range."""
+    if not pcm_bytes or gain == 1.0:
+        return pcm_bytes
+    samples = list(struct.unpack(f"<{len(pcm_bytes) // 2}h", pcm_bytes))
+    scaled = [max(-32768, min(32767, int(s * gain))) for s in samples]
+    return struct.pack(f"<{len(scaled)}h", *scaled)
+
+
 def _pcm_to_opus_frames(pcm_bytes: bytes, encoder) -> list:
     """Chunk PCM into 60 ms frames and encode to Opus. Returns list of bytes (each frame).
     Pads trailing bytes with silence so the last frame is complete (avoids abrupt cut)."""
     if not pcm_bytes or not encoder:
         return []
+    pcm_bytes = _apply_tts_gain(pcm_bytes, TTS_PCM_GAIN)
     # Pad to a multiple of FRAME_BYTES so we don't drop the tail (avoids harsh cut at end)
     remainder = len(pcm_bytes) % FRAME_BYTES
     if remainder:

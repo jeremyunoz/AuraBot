@@ -96,6 +96,11 @@ void lcd_lvgl_unlock(void)
 /* Internal callbacks                                                         */
 /* ========================================================================== */
 
+/** Semaphore signalled when each flush DMA completes (one Give per draw_bitmap). */
+static SemaphoreHandle_t s_flush_done_sem;
+/** Number of flush_cb calls in this refresh (so flush_wait_cb waits for all). */
+static volatile int s_pending_flushes;
+
 /**
  * Called by the LCD panel IO layer when DMA transfer of a frame completes.
  * Notifies LVGL that the flush buffer is free for the next render.
@@ -106,7 +111,25 @@ static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
 {
     lv_display_t *disp = (lv_display_t *)user_ctx;
     lv_display_flush_ready(disp);
+    if (s_flush_done_sem != NULL) {
+        xSemaphoreGive(s_flush_done_sem);
+    }
     return false;
+}
+
+/**
+ * LVGL flush-wait callback. Blocks until all flushes submitted this refresh
+ * have completed (one Take per flush_cb), yielding so the IDLE task can run.
+ */
+static void lvgl_flush_wait_cb(lv_display_t *disp)
+{
+    (void)disp;
+    if (s_flush_done_sem == NULL) return;
+    int n = s_pending_flushes;
+    s_pending_flushes = 0;
+    while (n-- > 0) {
+        xSemaphoreTake(s_flush_done_sem, portMAX_DELAY);
+    }
 }
 
 /**
@@ -119,6 +142,8 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area,
 {
     esp_lcd_panel_handle_t panel =
         (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
+
+    s_pending_flushes++;
 
     int x1 = area->x1;
     int x2 = area->x2;
@@ -201,7 +226,7 @@ lv_display_t *lcd_lvgl_init(void)
         .lcd_cmd_bits    = LCD_CMD_BITS,
         .lcd_param_bits  = LCD_PARAM_BITS,
         .spi_mode        = 0,
-        .trans_queue_depth = 10,
+        .trans_queue_depth = 16,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(
         (esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
@@ -260,6 +285,11 @@ lv_display_t *lcd_lvgl_init(void)
     lv_display_set_user_data(display, panel_handle);
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(display, lvgl_flush_cb);
+
+    /* Flush-wait callback: block on semaphore so CPU yields and task WDT is fed */
+    s_flush_done_sem = xSemaphoreCreateBinary();
+    assert(s_flush_done_sem != NULL);
+    lv_display_set_flush_wait_cb(display, lvgl_flush_wait_cb);
 
     /* ---------------------------------------------------------------------- */
     /* Step 9 – LVGL tick timer (2 ms)                                        */

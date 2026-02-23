@@ -294,13 +294,16 @@ esp_err_t voice_conversation_start(const char *uri)
     }
 
     int err = 0;
-    /* APPLICATION_AUDIO for uplink (like xiaozhi ESP_OPUS_ENC_APPLICATION_AUDIO); server uses audio+64k for TTS downlink */
+    /* Encoder: APPLICATION_AUDIO + VBR + AUTO bitrate (xiaozhi audio_service.h AS_OPUS_ENC_CONFIG).
+     * Speaking quality (playback) is determined by server TTS Opus bitrate (e.g. 96 kbps). */
     s_opus_enc = opus_encoder_create(SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_AUDIO, &err);
     if (!s_opus_enc || err != OPUS_OK) {
         ESP_LOGE(TAG, "opus_encoder_create failed %d", err);
         return ESP_FAIL;
     }
     opus_encoder_ctl(s_opus_enc, OPUS_SET_COMPLEXITY(0));
+    opus_encoder_ctl(s_opus_enc, OPUS_SET_VBR(1));
+    opus_encoder_ctl(s_opus_enc, OPUS_SET_BITRATE(OPUS_AUTO));
 
     s_opus_dec = opus_decoder_create(SAMPLE_RATE, CHANNELS, &err);
     if (!s_opus_dec || err != OPUS_OK) {
