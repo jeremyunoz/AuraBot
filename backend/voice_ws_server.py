@@ -78,15 +78,79 @@ TTS_END_MSG = json.dumps({"type": "tts_end"})
 # Thread pool for blocking ASR/TTS
 _executor = ThreadPoolExecutor(max_workers=2)
 
+# Voice WebSocket connection state and TTS text queue (for timer/wellness → online TTS)
+_voice_client_connected = False
+_voice_client_connected_lock = threading.Lock()
+_pending_text_tts_queue = None
 
-def _tts_to_pcm_16k(text: str) -> bytes:
+
+def _get_pending_text_tts_queue():
+    """Lazy-init thread-safe queue for TTS text from external callers (timer, wellness)."""
+    global _pending_text_tts_queue
+    if _pending_text_tts_queue is None:
+        _pending_text_tts_queue = queue.Queue()
+    return _pending_text_tts_queue
+
+
+def is_voice_client_connected() -> bool:
+    """True when an ESP32 is connected via the voice WebSocket."""
+    with _voice_client_connected_lock:
+        return _voice_client_connected
+
+
+def enqueue_tts_text(text: str) -> bool:
+    """Queue text for online TTS over the voice WebSocket. Returns True if queued, False if no client."""
+    if not text or not text.strip():
+        return False
+    with _voice_client_connected_lock:
+        if not _voice_client_connected:
+            return False
+    _get_pending_text_tts_queue().put_nowait(text)
+    return True
+
+
+def _online_tts_to_pcm_16k(text: str):
+    """Synthesize with gTTS → MP3 → ffmpeg to 16 kHz mono PCM. Returns bytes or None on failure."""
+    if not text or not text.strip():
+        return b""
+    try:
+        from gtts import gTTS
+    except ImportError:
+        logger.debug("gTTS not available for online TTS")
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        mp3_path = f.name
+    try:
+        tts = gTTS(text=text, lang="en", slow=False)
+        tts.save(mp3_path)
+        out = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", mp3_path,
+                "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-"
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        return out.stdout
+    except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
+        logger.warning("Online TTS failed: %s", e)
+        return None
+    finally:
+        try:
+            os.unlink(mp3_path)
+        except OSError:
+            pass
+
+
+def _offline_tts_to_pcm_16k(text: str) -> bytes:
     """Synthesize text to 16 kHz mono 16-bit PCM using espeak-ng + sox/ffmpeg."""
     if not text or not text.strip():
         return b""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
+    espeak_args = ["-w", wav_path, "-s", "180", text]
     try:
-        # espeak-ng to WAV (Linux/Pi)
         try:
             subprocess.run(
                 ["espeak-ng"] + espeak_args,
@@ -100,7 +164,6 @@ def _tts_to_pcm_16k(text: str) -> bytes:
             except (FileNotFoundError, subprocess.CalledProcessError):
                 logger.warning("espeak-ng/espeak not available for offline TTS")
                 return b""
-        # Convert to 16 kHz mono raw PCM
         try:
             out = subprocess.run(
                 ["sox", wav_path, "-r", str(SAMPLE_RATE), "-c", "1", "gain", "-n", "-0.05", "-t", "raw", "-"],
