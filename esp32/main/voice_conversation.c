@@ -9,6 +9,7 @@
  * - Separate tasks for encode, decode, playback; decode queue + playback stream.
  * - Opus APPLICATION_AUDIO for encoder (uplink); server uses audio + higher bitrate for TTS (downlink).
  * - Decoder reset and playback flush on tts_start to avoid cross-burst artifacts.
+ * - Frame duration in one place (OPUS_FRAME_DURATION_MS); buffer sizes derived like xiaozhi.
  */
 
 #include "voice/voice_conversation.h"
@@ -29,24 +30,28 @@
 
 static const char *TAG = "voice_conversation";
 
-#define SAMPLE_RATE         16000
-#define CHANNELS            1
-#define FRAME_MS            60
-#define FRAME_SAMPLES       ((FRAME_MS * SAMPLE_RATE) / 1000)
-#define FRAME_BYTES         (FRAME_SAMPLES * sizeof(int16_t))
-#define OPUS_MAX_PACKET     1275
-#define PCM_BUF_SIZE        (FRAME_BYTES * 2)
-#define PLAYBACK_BUF_SIZE   (FRAME_BYTES * 8)   /* 8 frames ~480 ms; smooth TTS playback (xiaozhi-style) */
-#define ENCODER_TASK_STACK  24576
-#define ENCODER_TASK_PRIO   5
-#define PLAYBACK_TASK_STACK 2560
-#define PLAYBACK_TASK_PRIO  6
-#define DECODER_TASK_STACK  12288
-#define DECODER_TASK_PRIO   5
-#define DECODER_QUEUE_LEN   24  /* enough headroom for TTS burst (xiaozhi uses ~40 for decode queue) */
-#define SPEAK_TO_LISTEN_MS  500
-#define ENCODER_RECV_TICKS  pdMS_TO_TICKS(60)
-#define ENCODER_SEND_TICKS  pdMS_TO_TICKS(80)
+/* Use header definitions; local aliases for implementation. */
+#define SAMPLE_RATE         VOICE_SAMPLE_RATE
+#define CHANNELS            VOICE_CHANNELS
+#define FRAME_MS            VOICE_FRAME_MS
+#define FRAME_SAMPLES       VOICE_FRAME_SAMPLES
+#define FRAME_BYTES         VOICE_FRAME_BYTES
+#define OPUS_MAX_PACKET     VOICE_OPUS_MAX_PACKET
+#define PLAYBACK_FRAMES     VOICE_PLAYBACK_FRAMES
+#define PLAYBACK_BUF_SIZE   (VOICE_FRAME_BYTES * VOICE_PLAYBACK_FRAMES)
+#define DECODER_QUEUE_LEN   VOICE_DECODER_QUEUE_LEN
+
+/* Internal: PCM/stream and task config (not part of public API). */
+#define PCM_BUF_SIZE            (FRAME_BYTES * 2)
+#define ENCODER_TASK_STACK      24576
+#define ENCODER_TASK_PRIO       5
+#define PLAYBACK_TASK_STACK     2560
+#define PLAYBACK_TASK_PRIO      6
+#define DECODER_TASK_STACK      12288
+#define DECODER_TASK_PRIO       6
+#define SPEAK_TO_LISTEN_MS      500
+#define ENCODER_RECV_TICKS      pdMS_TO_TICKS(FRAME_MS)
+#define ENCODER_SEND_TICKS      pdMS_TO_TICKS(80)
 
 typedef enum {
     VOICE_PHASE_LISTEN = 0,
