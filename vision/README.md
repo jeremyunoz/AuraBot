@@ -32,9 +32,29 @@ python object_detection.py
 
 Press 'q' to quit.
 
+### 4. Measure inference latency (benchmark)
+
+To measure per-frame inference latency (e.g. for reporting "X ms on Raspberry Pi 5"):
+
+From the **project root** (AuraBot/):
+
+```bash
+# Synthetic frame (no camera); quick and reproducible
+python -m vision/benchmark_yolo_latency --warmup 10 --runs 50
+
+# Live camera (real-world Pi 5 latency)
+python -m vision/benchmark_yolo_latency --camera --warmup 5 --runs 30
+
+# One-line output (mean ms and FPS only)
+python -m vision/benchmark_yolo_latency --quiet
+```
+
+Output includes mean/min/max/std of inference time (ms) and equivalent FPS. Use the mean ms value for the README claim.
+
 ## Files
 
 - `object_detection.py` - Main detection script
+- `benchmark_yolo_latency.py` - Measure per-frame inference latency (ms/FPS)
 - `setup_model.py` - Model setup script (run once)
 - `convert_model.py` - Manual model conversion script
 - `check_person_detection()` - Helper function to check for person detection
