@@ -86,7 +86,9 @@ else:
 # Gentle gain for TTS PCM (1.0 = no change). Slightly < 1 reduces sharp/harsh output.
 TTS_PCM_GAIN = float(os.environ.get("VOICE_TTS_PCM_GAIN", "0.90"))
 # Optional: log per-turn pipeline latency. Set to "1" or path to enable (default: backend/logs/voice_pipeline_latency.log).
-VOICE_LATENCY_LOG = os.environ.get("VOICE_LATENCY_LOG", "")
+# Read this at runtime (not import time) so .env load order cannot disable logging accidentally.
+def _get_voice_latency_log_setting() -> str:
+    return os.environ.get("VOICE_LATENCY_LOG", "")
 
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 _LOGS_DIR = os.path.join(_BACKEND_DIR, "logs")
@@ -95,9 +97,10 @@ _DEFAULT_LATENCY_LOG_PATH = os.path.join(_LOGS_DIR, "voice_pipeline_latency.log"
 
 def _write_voice_latency_log(stt_ms: float, response_ms: float, tts_ms: float, total_ms: float, transcript: str = ""):
     """Append one pipeline turn to the latency log when VOICE_LATENCY_LOG is set."""
-    if not VOICE_LATENCY_LOG:
+    voice_latency_log = _get_voice_latency_log_setting()
+    if not voice_latency_log:
         return
-    log_path = _DEFAULT_LATENCY_LOG_PATH if VOICE_LATENCY_LOG.lower() in ("1", "true", "yes") else VOICE_LATENCY_LOG
+    log_path = _DEFAULT_LATENCY_LOG_PATH if voice_latency_log.lower() in ("1", "true", "yes") else voice_latency_log
     if os.path.isabs(log_path):
         path = log_path
     else:
