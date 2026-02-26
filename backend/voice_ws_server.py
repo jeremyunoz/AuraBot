@@ -21,7 +21,7 @@ TTS pipeline aligned with xiaozhi-esp32 audio approach (github.com/78/xiaozhi-es
 "audio" + 64 kbps for playback quality; espeak-ng with softer params; PCM pad and decoder reset on burst start on ESP32.
 
 Run standalone: python voice_ws_server.py
-Integrated: sim_loop sets app.state.aurabot and runs this server by default (ENABLE_VOICE_WS=true; voice capture on ESP32). Set ENABLE_VOICE_WS=false to use Pi mic instead.
+Integrated: sim_loop sets app.state.aurabot and runs this server (ESP32 voice capture).
 """
 
 import asyncio
@@ -60,7 +60,8 @@ TTS_PCM_GAIN = float(os.environ.get("VOICE_TTS_PCM_GAIN", "0.95"))
 VOICE_LATENCY_LOG = os.environ.get("VOICE_LATENCY_LOG", "")
 
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_LATENCY_LOG_PATH = os.path.join(_BACKEND_DIR, "logs/voice_pipeline_latency.log")
+_LOGS_DIR = os.path.join(_BACKEND_DIR, "logs")
+_DEFAULT_LATENCY_LOG_PATH = os.path.join(_LOGS_DIR, "voice_pipeline_latency.log")
 
 
 def _write_voice_latency_log(stt_ms: float, response_ms: float, tts_ms: float, total_ms: float, transcript: str = ""):
@@ -92,8 +93,7 @@ except Exception as e:
     logger.warning("opuslib not available (install libopus-dev and opuslib): %s", e)
     _OPUS_AVAILABLE = False
 
-# Speech recognition (from PCM buffer, not Pi mic)
-import speech_recognition as sr
+from stt import STT
 
 app = FastAPI(title="AuraBot Voice WS", version="0.2.0")
 
@@ -258,7 +258,8 @@ def _pcm_to_opus_frames(pcm_bytes: bytes, encoder) -> list:
     Pads trailing bytes with silence so the last frame is complete (avoids abrupt cut)."""
     if not pcm_bytes or not encoder:
         return []
-    pcm_bytes = _apply_tts_gain(pcm_bytes, TTS_PCM_GAIN)
+    # Disabled extra TTS gain to test raw TTS levels
+    # pcm_bytes = _apply_tts_gain(pcm_bytes, TTS_PCM_GAIN)
     # Pad to a multiple of FRAME_BYTES so we don't drop the tail (avoids harsh cut at end)
     remainder = len(pcm_bytes) % FRAME_BYTES
     if remainder:
@@ -274,24 +275,6 @@ def _pcm_to_opus_frames(pcm_bytes: bytes, encoder) -> list:
         except Exception as e:
             logger.debug("opus encode skip: %s", e)
     return frames
-
-
-def _run_asr_only(pcm_bytes: bytes, recognizer) -> str:
-    """Run ASR on PCM; return transcript or empty string. No LLM."""
-    if not pcm_bytes or len(pcm_bytes) < 16000:  # need at least ~0.5 s
-        return ""
-    try:
-        audio = sr.AudioData(pcm_bytes, SAMPLE_RATE, 2)
-        text = recognizer.recognize_google(audio, language="en-US")
-        return (text or "").strip()
-    except sr.UnknownValueError:
-        return ""
-    except sr.RequestError as e:
-        logger.warning("ASR request error: %s", e)
-        return ""
-    except Exception as e:
-        logger.warning("ASR error: %s", e)
-        return ""
 
 
 @app.websocket("/voice")
@@ -317,7 +300,7 @@ async def voice_websocket(websocket: WebSocket):
     except asyncio.TimeoutError:
         logger.warning("Voice WS: no client hello within 5s")
 
-    # Now create decoder/encoder/recognizer (avoids delaying hello response)
+    # Now create decoder/encoder/STT (avoids delaying hello response)
     decoder = Decoder(SAMPLE_RATE, CHANNELS)
     # Use "audio" + higher bitrate for TTS so playback is less harsh than voip/low-bitrate
     encoder = Encoder(SAMPLE_RATE, CHANNELS, "audio")
@@ -325,7 +308,7 @@ async def voice_websocket(websocket: WebSocket):
         encoder.bitrate = OPUS_TTS_BITRATE
     except Exception:
         pass  # opuslib may not expose bitrate on all builds
-    recognizer = sr.Recognizer()
+    stt = STT()
 
     # Optional: send greeting when integrated with AuraBot (voice capture on ESP32)
     bot = getattr(app.state, "aurabot", None) if app else None
@@ -433,9 +416,8 @@ async def voice_websocket(websocket: WebSocket):
                 t0 = time.perf_counter()
                 transcript = await loop.run_in_executor(
                     _executor,
-                    _run_asr_only,
+                    stt.transcribe,
                     to_process,
-                    recognizer,
                 )
                 t1 = time.perf_counter()
                 stt_ms = (t1 - t0) * 1000.0

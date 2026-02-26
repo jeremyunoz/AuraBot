@@ -3,7 +3,6 @@ Main simulation loop for AuraBot chatbot.
 Handles conversation flow, speech recognition, and text-to-speech interactions.
 """
 
-from stt import STT
 from tts import TTS
 from logger import AuraBotLogger, ConversationLogger
 from response_handler import ResponseHandler
@@ -27,7 +26,6 @@ load_dotenv()
 # Configuration
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "aurabot_conversation.log")
-AUDIO_HANDOFF_DELAY = 0.5  # Delay for audio device handoff
 SHUTDOWN_DELAY = 0.5  # Delay before shutdown
 
 
@@ -77,9 +75,6 @@ class AuraBot:
         self.greeting = greeting
         # Use AuraBotLogger for comprehensive logging with category routing
         self.logger = AuraBotLogger(log_file=log_file or LOG_FILE)
-
-        # Initialize STT (Pi does STT; TTS is on ESP32 via MQTT)
-        self.stt = STT()
 
         # Initialize TTS (raw engine; may wrap with deprecated TTSWithMQTT when MQTT is enabled)
         self._tts_engine_raw = TTS()
@@ -182,38 +177,6 @@ class AuraBot:
             except Exception as e:
                 self.logger.log_error(f"Vision integration failed to start: {e}")
 
-    def start(self):
-        """Start the chatbot conversation (Pi mic → STT → response → TTS)."""
-        self.start_services()
-        self._speak_safely(self.greeting)
-        self._run_conversation_loop()
-    
-    def _run_conversation_loop(self):
-        """Main conversation loop."""
-        while self._is_running:
-            # Listen for user input
-            user_text = self.stt.listen_and_transcribe()
-            
-            # Skip empty inputs
-            if not user_text:
-                continue
-            
-            # Get bot response
-            bot_text, should_exit = self.response_handler.get_response(user_text)
-            
-            # Handle exit
-            if should_exit:
-                self._speak_safely(bot_text)
-                self.logger.log_event(user_text, bot_text)
-                sleep(SHUTDOWN_DELAY)
-                self._shutdown()
-                break
-            
-            # Process regular response
-            sleep(AUDIO_HANDOFF_DELAY)
-            self._speak_safely(bot_text)
-            self.logger.log_event(user_text, bot_text)
-    
     def _speak_safely(self, message: str):
         """
         Safely speak a message with error handling.
@@ -406,7 +369,6 @@ def main():
     Configuration via environment variables:
     - ENABLE_MQTT: Set to "false" to disable MQTT (default: enabled)
     - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
-    - ENABLE_VOICE_WS: Set to "false" to use Pi microphone instead of ESP32 (default: true = ESP32 records sound via WebSocket). When true, Pi runs the voice WebSocket server; ESP32 sends Opus, Pi runs ASR/LLM/TTS and sends TTS Opus back.
     - VOICE_WS_PORT: Port for the voice WebSocket server (default: 8765)
     - ENABLE_LLM: Set to "false" to disable LLM conversation (default: enabled)
     - LLM_BACKEND: "gemini" or "ollama" (default: gemini)
@@ -421,7 +383,6 @@ def main():
     # Check MQTT enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
     enable_vision = os.getenv("ENABLE_VISION", "false").lower() == "true"
-    enable_voice_ws = os.getenv("ENABLE_VOICE_WS", "true").lower() != "false"
     voice_ws_port = int(os.getenv("VOICE_WS_PORT", "8765"))
 
     # LLM configuration
@@ -488,23 +449,18 @@ def main():
         metadata={"port": dashboard_port, "local_url": f"http://localhost:{dashboard_port}"}
     )
 
-    if enable_voice_ws:
-        # Voice capture on ESP32: start services only, then run voice WebSocket server (no Pi mic loop)
-        try:
-            from voice_ws_server import app as voice_ws_app, run_voice_server
-        except ImportError:
-            from backend.voice_ws_server import app as voice_ws_app, run_voice_server
-        bot.start_services()
-        voice_ws_app.state.aurabot = bot
-        bot.logger.log_general(
-            f"Voice WebSocket server enabled (ESP32 voice capture) at ws://0.0.0.0:{voice_ws_port}/voice",
-            "INFO",
-            metadata={"port": voice_ws_port},
-        )
-        run_voice_server(host="0.0.0.0", port=voice_ws_port)
-    else:
-        # Pi mic: full conversation loop (STT on Pi → response → TTS)
-        bot.start()
+    try:
+        from voice_ws_server import app as voice_ws_app, run_voice_server
+    except ImportError:
+        from backend.voice_ws_server import app as voice_ws_app, run_voice_server
+    bot.start_services()
+    voice_ws_app.state.aurabot = bot
+    bot.logger.log_general(
+        f"Voice WebSocket server started at ws://0.0.0.0:{voice_ws_port}/voice",
+        "INFO",
+        metadata={"port": voice_ws_port},
+    )
+    run_voice_server(host="0.0.0.0", port=voice_ws_port)
 
 
 if __name__ == "__main__":
