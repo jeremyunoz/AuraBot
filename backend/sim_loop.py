@@ -7,7 +7,7 @@ from stt import STT
 from tts import TTS
 from logger import AuraBotLogger, ConversationLogger
 from response_handler import ResponseHandler
-from llm_client import LLMClient
+from llm_client import LLMClient, OllamaLLMClient
 from timer_manager import TimerManager
 from wellness_timer_trigger import WellnessTimerTrigger
 from time import sleep
@@ -42,8 +42,11 @@ class AuraBot:
                  enable_mqtt: bool = True,
                  enable_vision: bool = False,
                  enable_llm: bool = True,
+                 llm_backend: str = "gemini",
                  gemini_api_key: Optional[str] = None,
                  gemini_model: str = "gemini-2.5-flash",
+                 ollama_model: str = "lfm2.5-thinking",
+                 ollama_host: str = "http://127.0.0.1:11434",
                  llm_system_prompt: Optional[str] = None,
                  wellness_threshold_seconds: Optional[int] = None,
                  wellness_break_duration_seconds: Optional[int] = None,
@@ -57,9 +60,12 @@ class AuraBot:
             custom_responses: Optional custom response dictionary
             enable_mqtt: Whether to enable MQTT integration for sensor data
             enable_vision: Whether to use camera for presence (person detection); requires enable_mqtt
-            enable_llm: Whether to enable LLM-powered conversation (Gemini)
+            enable_llm: Whether to enable LLM-powered conversation
+            llm_backend: "gemini" or "ollama" (default: gemini)
             gemini_api_key: Google AI API key (or set GEMINI_API_KEY env var)
             gemini_model: Gemini model identifier (default: gemini-2.5-flash)
+            ollama_model: Ollama model name when llm_backend=ollama (default: lfm2.5-thinking)
+            ollama_host: Ollama server URL when llm_backend=ollama (default: http://127.0.0.1:11434)
             llm_system_prompt: Custom system prompt for the LLM personality
             wellness_threshold_seconds: Seconds of sitting before triggering wellness timer
                                       (None uses default from WellnessTimerTrigger)
@@ -87,14 +93,24 @@ class AuraBot:
         llm_client = None
         if enable_llm:
             try:
-                llm_client = LLMClient(
-                    api_key=gemini_api_key,
-                    model=gemini_model,
-                    system_prompt=llm_system_prompt,
-                )
-                self.logger.log_general(
-                    f"LLM conversation enabled (model: {gemini_model})", "INFO"
-                )
+                if llm_backend.lower() == "ollama":
+                    llm_client = OllamaLLMClient(
+                        model=ollama_model,
+                        host=ollama_host,
+                        system_prompt=llm_system_prompt,
+                    )
+                    self.logger.log_general(
+                        f"LLM conversation enabled (Ollama, model: {ollama_model})", "INFO"
+                    )
+                else:
+                    llm_client = LLMClient(
+                        api_key=gemini_api_key,
+                        model=gemini_model,
+                        system_prompt=llm_system_prompt,
+                    )
+                    self.logger.log_general(
+                        f"LLM conversation enabled (Gemini, model: {gemini_model})", "INFO"
+                    )
             except Exception as e:
                 self.logger.log_error(f"Could not initialize LLM client: {e}")
                 self.logger.log_general(
@@ -392,9 +408,12 @@ def main():
     - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
     - ENABLE_VOICE_WS: Set to "false" to use Pi microphone instead of ESP32 (default: true = ESP32 records sound via WebSocket). When true, Pi runs the voice WebSocket server; ESP32 sends Opus, Pi runs ASR/LLM/TTS and sends TTS Opus back.
     - VOICE_WS_PORT: Port for the voice WebSocket server (default: 8765)
-    - ENABLE_LLM: Set to "false" to disable Gemini conversation (default: enabled)
-    - GEMINI_API_KEY: Google AI API key for Gemini (required when LLM is enabled)
+    - ENABLE_LLM: Set to "false" to disable LLM conversation (default: enabled)
+    - LLM_BACKEND: "gemini" or "ollama" (default: gemini)
+    - GEMINI_API_KEY: Google AI API key for Gemini (required when LLM_BACKEND=gemini)
     - GEMINI_MODEL: Gemini model identifier (default: gemini-2.5-flash)
+    - OLLAMA_MODEL: Ollama model name when LLM_BACKEND=ollama (default: lfm2.5-thinking)
+    - OLLAMA_HOST: Ollama server URL when LLM_BACKEND=ollama (default: http://127.0.0.1:11434)
     - WELLNESS_THRESHOLD_SECONDS: Sitting time threshold before wellness timer triggers
     - WELLNESS_BREAK_DURATION_SECONDS: Duration of wellness break timer
     - WELLNESS_PAUSE_TIMEOUT_SECONDS: Seconds to wait while paused before stopping session
@@ -407,8 +426,11 @@ def main():
 
     # LLM configuration
     enable_llm = os.getenv("ENABLE_LLM", "true").lower() != "false"
+    llm_backend = os.getenv("LLM_BACKEND", "gemini").lower()
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    ollama_model = os.getenv("OLLAMA_MODEL", "lfm2.5-thinking")
+    ollama_host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
     
     # Get wellness configuration from environment variables
     env_threshold = os.getenv("WELLNESS_THRESHOLD_SECONDS")
@@ -425,8 +447,11 @@ def main():
         enable_mqtt=enable_mqtt,
         enable_vision=enable_vision,
         enable_llm=enable_llm,
+        llm_backend=llm_backend,
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model,
+        ollama_model=ollama_model,
+        ollama_host=ollama_host,
         wellness_threshold_seconds=wellness_threshold,
         wellness_break_duration_seconds=break_duration,
         wellness_pause_timeout_seconds=pause_timeout,

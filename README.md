@@ -65,6 +65,7 @@ python sim_loop.py
 - Starts the voice loop, MQTT integration (if enabled), and web dashboard at http://localhost:8000
 - Use `backend/.env` for `MQTT_HOST`, `MQTT_PORT`, `MQTT_USERNAME`, `MQTT_PASSWORD`
 - **Voice**: By default the ESP32 records sound (WebSocket to Pi); Pi runs ASR/LLM/TTS and sends TTS Opus back. Set `ENABLE_VOICE_WS=false` to use the Pi microphone instead. See "Voice session" below.
+- **LLM backends**: Set `LLM_BACKEND=gemini` (default) for Google Gemini, or `LLM_BACKEND=ollama` for local Ollama on the Pi. For Ollama, install and start Ollama (`curl -fsSL https://ollama.com/install.sh | sh`), then run `ollama pull tinyllama` (or another small model). Use `OLLAMA_MODEL` and `OLLAMA_HOST` in `.env` to configure.
 
 ### Presence simulation (no hardware)
 

@@ -4,6 +4,7 @@ gTTS>=2.5.0
 # pyttsx3==2.99
 paho-mqtt==2.1.0
 python-dotenv==1.2.1
+requests>=2.28.0
 
 # Google Gemini SDK for LLM-powered conversation
 google-genai>=1.0.0
