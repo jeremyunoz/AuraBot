@@ -33,7 +33,9 @@ import struct
 import subprocess
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from fastapi import FastAPI, WebSocket
 from starlette.websockets import WebSocketDisconnect
@@ -54,6 +56,33 @@ UTTERANCE_BYTES = int(SAMPLE_RATE * 2.5 * 2)  # 80_000 bytes
 OPUS_TTS_BITRATE = int(os.environ.get("VOICE_OPUS_TTS_BITRATE", "96000"))
 # Gentle gain for TTS PCM (1.0 = no change). Slightly < 1 reduces loudness fatigue (e.g. 0.9 = ~-1 dB).
 TTS_PCM_GAIN = float(os.environ.get("VOICE_TTS_PCM_GAIN", "0.95"))
+# Optional: log per-turn pipeline latency. Set to "1" or path to enable (default: backend/logs/voice_pipeline_latency.log).
+VOICE_LATENCY_LOG = os.environ.get("VOICE_LATENCY_LOG", "")
+
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_LATENCY_LOG_PATH = os.path.join(_BACKEND_DIR, "logs/voice_pipeline_latency.log")
+
+
+def _write_voice_latency_log(stt_ms: float, response_ms: float, tts_ms: float, total_ms: float, transcript: str = ""):
+    """Append one pipeline turn to the latency log when VOICE_LATENCY_LOG is set."""
+    if not VOICE_LATENCY_LOG:
+        return
+    log_path = _DEFAULT_LATENCY_LOG_PATH if VOICE_LATENCY_LOG.lower() in ("1", "true", "yes") else VOICE_LATENCY_LOG
+    if os.path.isabs(log_path):
+        path = log_path
+    else:
+        path = os.path.join(_BACKEND_DIR, log_path)
+    try:
+        ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        line = (
+            f"[{ts}] pipeline_latency stt_ms={stt_ms:.0f} response_ms={response_ms:.0f} "
+            f"tts_ms={tts_ms:.0f} total_ms={total_ms:.0f} transcript={transcript!r}\n"
+        )
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as e:
+        logger.debug("Could not write voice latency log: %s", e)
 
 # Optional: opuslib for decode/encode (requires libopus: sudo apt-get install libopus0 libopus-dev)
 try:
@@ -401,12 +430,15 @@ async def voice_websocket(websocket: WebSocket):
                 to_process = bytes(pcm_buffer[:UTTERANCE_BYTES])
                 pcm_buffer = pcm_buffer[UTTERANCE_BYTES:]  # keep remainder
 
+                t0 = time.perf_counter()
                 transcript = await loop.run_in_executor(
                     _executor,
                     _run_asr_only,
                     to_process,
                     recognizer,
                 )
+                t1 = time.perf_counter()
+                stt_ms = (t1 - t0) * 1000.0
                 if transcript:
                     logger.info("STT: %s", transcript)
 
@@ -414,6 +446,8 @@ async def voice_websocket(websocket: WebSocket):
                 bot = getattr(app.state, "aurabot", None) if app else None
                 if bot is not None and transcript:
                     response_text, should_exit = bot.response_handler.get_response(transcript.lower())
+                    t2 = time.perf_counter()
+                    response_ms = (t2 - t1) * 1000.0
                     try:
                         bot.logger.log_event(transcript, response_text)
                     except Exception as e:
@@ -434,6 +468,8 @@ async def voice_websocket(websocket: WebSocket):
                             await websocket.send_text(TTS_END_MSG)
                         break
                 else:
+                    t2 = time.perf_counter()
+                    response_ms = (t2 - t1) * 1000.0
                     response_text = f"You said: {transcript}" if transcript else ""
 
                 if not response_text:
@@ -445,6 +481,14 @@ async def voice_websocket(websocket: WebSocket):
                     return _pcm_to_opus_frames(pcm, encoder)
 
                 opus_frames = await loop.run_in_executor(_executor, do_tts)
+                t3 = time.perf_counter()
+                tts_ms = (t3 - t2) * 1000.0
+                total_ms = (t3 - t0) * 1000.0
+                logger.info(
+                    "Voice pipeline latency: stt=%.0f ms response=%.0f ms tts=%.0f ms total=%.0f ms",
+                    stt_ms, response_ms, tts_ms, total_ms,
+                )
+                _write_voice_latency_log(stt_ms, response_ms, tts_ms, total_ms, transcript or "")
                 if opus_frames:
                     pending_tts_queue.put_nowait(opus_frames)
 

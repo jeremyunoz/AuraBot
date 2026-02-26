@@ -136,6 +136,20 @@ When voice capture is on the ESP32 (not the Pi), the Pi runs a WebSocket voice s
 
 4. **Test**: Put the device in ACTIVE state (e.g. wake + start session). ESP32 connects, gets server hello and the greeting TTS, then streams mic Opus. Pi runs ASR → LLM/timers → TTS Opus back to ESP32.
 
+**Measuring end-to-end speech pipeline (STT → LLM → TTS) response time**
+
+- Each voice turn is timed on the Pi: **STT** (ASR), **response** (LLM or keyword), **TTS** (synthesis), and **total** (utterance start to TTS ready).
+- **Live interaction:** Run the bot as above (`python sim_loop.py` with ESP32 or Pi mic). Every turn logs one line to the console, e.g.  
+  `Voice pipeline latency: stt=420 ms response=890 ms tts=1100 ms total=2410 ms`
+- **Log file:** To append per-turn latency to a file (e.g. for reporting or averaging), set `VOICE_LATENCY_LOG=1` (writes to `backend/logs/voice_pipeline_latency.log`) or `VOICE_LATENCY_LOG=/path/to/file.log`:
+  ```bash
+  cd backend
+  VOICE_LATENCY_LOG=1 python sim_loop.py
+  ```
+  Each line in the log looks like:  
+  `[2026-02-26T12:00:00Z] pipeline_latency stt_ms=420 response_ms=890 tts_ms=1100 total_ms=2410 transcript='hello'`
+- Use the **total** value as the end-to-end response time (e.g. “achieved ~2400 ms response time during live interaction tests”). Average over multiple turns for a stable number.
+
 ### How it works
 
 1. **Startup**: AuraBot greets you with "Hello! I am AuraBot. Let's talk."

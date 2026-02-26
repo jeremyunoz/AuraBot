@@ -37,6 +37,8 @@ env/
 # Logs
 logs/
 *.log
+vision/yolo_inference_latency.log
+backend/logs/voice_pipeline_latency.log
 
 # Output files
 out/
