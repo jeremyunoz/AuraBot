@@ -6,7 +6,13 @@ Handles conversation flow, speech recognition, and text-to-speech interactions.
 from tts import TTS
 from logger import AuraBotLogger, ConversationLogger
 from response_handler import ResponseHandler
-from llm_client import LLMClient, OllamaLLMClient
+from llm_client import (
+    LLMClient,
+    OllamaLLMClient,
+    HybridLLMClient,
+    build_gemini_profile_from_env,
+    build_ollama_profile_from_env,
+)
 from timer_manager import TimerManager
 from wellness_timer_trigger import WellnessTimerTrigger
 from time import sleep
@@ -33,22 +39,28 @@ SHUTDOWN_DELAY = 0.5  # Delay before shutdown
 class AuraBot:
     """Main chatbot class that orchestrates STT, TTS, and conversation logic."""
     
-    def __init__(self, 
-                 greeting: str = "Hello! I am AuraBot. Let's talk.",
-                 log_file: Optional[str] = None,
-                 custom_responses: Optional[Dict[str, str]] = None,
-                 enable_mqtt: bool = True,
-                 enable_vision: bool = False,
-                 enable_llm: bool = True,
-                 llm_backend: str = "gemini",
-                 gemini_api_key: Optional[str] = None,
-                 gemini_model: str = "gemini-2.5-flash",
-                 ollama_model: str = "lfm2.5-thinking",
-                 ollama_host: str = "http://127.0.0.1:11434",
-                 llm_system_prompt: Optional[str] = None,
-                 wellness_threshold_seconds: Optional[int] = None,
-                 wellness_break_duration_seconds: Optional[int] = None,
-                 wellness_pause_timeout_seconds: Optional[int] = None):
+    def __init__(
+        self,
+        greeting: str = "Hello! I am AuraBot. Let's talk.",
+        log_file: Optional[str] = None,
+        custom_responses: Optional[Dict[str, str]] = None,
+        enable_mqtt: bool = True,
+        enable_vision: bool = False,
+        enable_llm: bool = True,
+        llm_backend: str = "gemini",
+        gemini_api_key: Optional[str] = None,
+        gemini_model: str = "gemini-2.5-flash",
+        ollama_model: str = "lfm2.5-thinking",
+        ollama_host: str = "http://127.0.0.1:11434",
+        llm_system_prompt: Optional[str] = None,
+        wellness_threshold_seconds: Optional[int] = None,
+        wellness_break_duration_seconds: Optional[int] = None,
+        wellness_pause_timeout_seconds: Optional[int] = None,
+        llm_primary_backend: Optional[str] = None,
+        llm_fallback_backend: Optional[str] = None,
+        llm_disable_fallback: bool = False,
+        local_llm_warm_on_start: bool = False,
+    ):
         """
         Initialize the AuraBot chatbot.
         
@@ -59,7 +71,7 @@ class AuraBot:
             enable_mqtt: Whether to enable MQTT integration for sensor data
             enable_vision: Whether to use camera for presence (person detection); requires enable_mqtt
             enable_llm: Whether to enable LLM-powered conversation
-            llm_backend: "gemini" or "ollama" (default: gemini)
+            llm_backend: Deprecated alias for the primary LLM backend ("gemini" or "ollama").
             gemini_api_key: Google AI API key (or set GEMINI_API_KEY env var)
             gemini_model: Gemini model identifier (default: gemini-2.5-flash)
             ollama_model: Ollama model name when llm_backend=ollama (default: lfm2.5-thinking)
@@ -71,6 +83,12 @@ class AuraBot:
                                            (None uses default from WellnessTimerTrigger)
             wellness_pause_timeout_seconds: Seconds to wait while paused before stopping session
                                             (None uses default from WellnessTimerTrigger)
+            llm_primary_backend: Optional explicit primary backend ("gemini" or "ollama").
+                                 Falls back to llm_backend when not provided.
+            llm_fallback_backend: Optional fallback backend ("gemini" or "ollama") used by HybridLLMClient.
+            llm_disable_fallback: When True, always use a single backend (no hybrid routing).
+            local_llm_warm_on_start: When True and a local Ollama backend is configured, send a
+                                     tiny warm-up request on startup to reduce first-response latency.
         """
         self.greeting = greeting
         # Use AuraBotLogger for comprehensive logging with category routing
@@ -86,26 +104,120 @@ class AuraBot:
 
         # Initialize LLM client for intelligent conversation (optional)
         llm_client = None
+        self._llm_backend_primary = (llm_primary_backend or llm_backend or "gemini").lower()
+        self._llm_backend_fallback = (llm_fallback_backend or "").lower() if llm_fallback_backend else None
+        self._llm_disable_fallback = llm_disable_fallback
+
         if enable_llm:
             try:
-                if llm_backend.lower() == "ollama":
-                    llm_client = OllamaLLMClient(
+                primary = self._llm_backend_primary
+                fallback = self._llm_backend_fallback
+
+                use_hybrid = (
+                    not self._llm_disable_fallback
+                    and fallback
+                    and fallback != primary
+                )
+
+                if not use_hybrid:
+                    if primary == "ollama":
+                        llm_client = OllamaLLMClient(
+                            model=ollama_model,
+                            host=ollama_host,
+                            system_prompt=llm_system_prompt,
+                        )
+                        self.logger.log_general(
+                            f"LLM conversation enabled (Ollama, model: {ollama_model})", "INFO"
+                        )
+                    else:
+                        llm_client = LLMClient(
+                            api_key=gemini_api_key,
+                            model=gemini_model,
+                            system_prompt=llm_system_prompt,
+                        )
+                        self.logger.log_general(
+                            f"LLM conversation enabled (Gemini, model: {gemini_model})", "INFO"
+                        )
+                else:
+                    # Build profiles using explicit constructor values and environment-driven defaults.
+                    gemini_profile = build_gemini_profile_from_env(
+                        model=gemini_model,
+                        system_prompt=llm_system_prompt,
+                    )
+                    ollama_profile = build_ollama_profile_from_env(
                         model=ollama_model,
                         host=ollama_host,
                         system_prompt=llm_system_prompt,
                     )
+
+                    if primary == "ollama":
+                        primary_client = OllamaLLMClient(
+                            model=ollama_profile.model,
+                            host=ollama_profile.host,
+                            system_prompt=ollama_profile.system_prompt,
+                            max_history_turns=ollama_profile.max_history_turns,
+                            temperature=ollama_profile.temperature,
+                            max_output_tokens=ollama_profile.max_output_tokens,
+                            timeout_seconds=ollama_profile.timeout_seconds,
+                        )
+                        fallback_client = LLMClient(
+                            api_key=gemini_api_key,
+                            model=gemini_profile.model,
+                            system_prompt=gemini_profile.system_prompt,
+                            max_history_turns=gemini_profile.max_history_turns,
+                            temperature=gemini_profile.temperature,
+                            max_output_tokens=gemini_profile.max_output_tokens,
+                        )
+                    else:
+                        primary_client = LLMClient(
+                            api_key=gemini_api_key,
+                            model=gemini_profile.model,
+                            system_prompt=gemini_profile.system_prompt,
+                            max_history_turns=gemini_profile.max_history_turns,
+                            temperature=gemini_profile.temperature,
+                            max_output_tokens=gemini_profile.max_output_tokens,
+                        )
+                        fallback_client = OllamaLLMClient(
+                            model=ollama_profile.model,
+                            host=ollama_profile.host,
+                            system_prompt=ollama_profile.system_prompt,
+                            max_history_turns=ollama_profile.max_history_turns,
+                            temperature=ollama_profile.temperature,
+                            max_output_tokens=ollama_profile.max_output_tokens,
+                            timeout_seconds=ollama_profile.timeout_seconds,
+                        )
+
+                    llm_client = HybridLLMClient(
+                        primary_client=primary_client,
+                        fallback_client=fallback_client,
+                        primary_name=primary,
+                        fallback_name=fallback,
+                        logger=self.logger,
+                    )
                     self.logger.log_general(
-                        f"LLM conversation enabled (Ollama, model: {ollama_model})", "INFO"
+                        f"LLM conversation enabled (Hybrid primary={primary}, fallback={fallback})",
+                        "INFO",
+                        metadata={
+                            "primary_backend": primary,
+                            "fallback_backend": fallback,
+                            "gemini_model": gemini_profile.model,
+                            "ollama_model": ollama_profile.model,
+                        },
                     )
-                else:
-                    llm_client = LLMClient(
-                        api_key=gemini_api_key,
-                        model=gemini_model,
-                        system_prompt=llm_system_prompt,
-                    )
-                    self.logger.log_general(
-                        f"LLM conversation enabled (Gemini, model: {gemini_model})", "INFO"
-                    )
+
+                # Optional warm-up for local Ollama backend to reduce first response latency.
+                if local_llm_warm_on_start and isinstance(llm_client, HybridLLMClient):
+                    try:
+                        # Fire-and-forget tiny prompt; ignore content.
+                        llm_client.generate_response("hi")
+                        self.logger.log_general(
+                            "Local LLM warm-up completed via HybridLLMClient.",
+                            "INFO",
+                            metadata={"backend": "hybrid"},
+                        )
+                    except Exception as e:
+                        self.logger.log_error(f"Local LLM warm-up failed: {e}")
+
             except Exception as e:
                 self.logger.log_error(f"Could not initialize LLM client: {e}")
                 self.logger.log_general(
@@ -371,7 +483,11 @@ def main():
     - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
     - VOICE_WS_PORT: Port for the voice WebSocket server (default: 8765)
     - ENABLE_LLM: Set to "false" to disable LLM conversation (default: enabled)
-    - LLM_BACKEND: "gemini" or "ollama" (default: gemini)
+    - LLM_BACKEND: Deprecated alias for primary backend; prefer LLM_PRIMARY_BACKEND
+    - LLM_PRIMARY_BACKEND: "gemini" or "ollama" (default: value of LLM_BACKEND or "gemini")
+    - LLM_FALLBACK_BACKEND: Optional fallback backend when hybrid routing is enabled (default: "ollama")
+    - LLM_DISABLE_FALLBACK: Set to "true" to disable hybrid routing (default: false)
+    - LOCAL_LLM_WARM_ON_START: Set to "true" to send a one-time warm-up prompt to the local LLM on startup
     - GEMINI_API_KEY: Google AI API key for Gemini (required when LLM_BACKEND=gemini)
     - GEMINI_MODEL: Gemini model identifier (default: gemini-2.5-flash)
     - OLLAMA_MODEL: Ollama model name when LLM_BACKEND=ollama (default: lfm2.5-thinking)
@@ -387,7 +503,13 @@ def main():
 
     # LLM configuration
     enable_llm = os.getenv("ENABLE_LLM", "true").lower() != "false"
-    llm_backend = os.getenv("LLM_BACKEND", "gemini").lower()
+    # Backwards-compatible primary backend selection
+    legacy_backend = os.getenv("LLM_BACKEND", "gemini").lower()
+    llm_primary_backend = os.getenv("LLM_PRIMARY_BACKEND", legacy_backend).lower()
+    llm_fallback_backend = os.getenv("LLM_FALLBACK_BACKEND", "ollama").lower()
+    llm_disable_fallback = os.getenv("LLM_DISABLE_FALLBACK", "false").lower() == "true"
+    local_llm_warm_on_start = os.getenv("LOCAL_LLM_WARM_ON_START", "false").lower() == "true"
+
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     ollama_model = os.getenv("OLLAMA_MODEL", "lfm2.5-thinking")
@@ -408,11 +530,15 @@ def main():
         enable_mqtt=enable_mqtt,
         enable_vision=enable_vision,
         enable_llm=enable_llm,
-        llm_backend=llm_backend,
+        llm_backend=llm_primary_backend,
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model,
         ollama_model=ollama_model,
         ollama_host=ollama_host,
+        llm_primary_backend=llm_primary_backend,
+        llm_fallback_backend=llm_fallback_backend,
+        llm_disable_fallback=llm_disable_fallback,
+        local_llm_warm_on_start=local_llm_warm_on_start,
         wellness_threshold_seconds=wellness_threshold,
         wellness_break_duration_seconds=break_duration,
         wellness_pause_timeout_seconds=pause_timeout,
