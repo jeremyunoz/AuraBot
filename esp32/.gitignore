@@ -12,6 +12,7 @@ sdkconfig.ci*
 sdkconfig 2.old
 sdkconfig 3
 sdkconfig
+sdkconfig *
 
 # ===== Python =====
 __pycache__/
