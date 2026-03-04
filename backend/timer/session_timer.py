@@ -38,8 +38,9 @@ class SessionTimer:
         if session_data_file:
             self.session_data_file = session_data_file
         else:
-            # Default to logs directory
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            # Default to logs directory (repo root / logs)
+            backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            project_root = os.path.dirname(backend_dir)
             logs_dir = os.path.join(project_root, "logs")
             os.makedirs(logs_dir, exist_ok=True)
             self.session_data_file = os.path.join(logs_dir, "sitting_sessions.json")
@@ -268,4 +269,3 @@ class SessionTimer:
                 json.dump(self._sessions, f, indent=2)
         except IOError as e:
             print(f"Error saving session history: {e}")
-

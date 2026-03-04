@@ -57,6 +57,16 @@ A voice-activated wellness chatbot that uses speech-to-text and text-to-speech f
 
 ### Run AuraBot (main loop)
 
+From the **project root** (recommended):
+
+```bash
+python -m backend
+# or
+python -m backend.sim_loop
+```
+
+From the `backend/` directory:
+
 ```bash
 cd backend
 python sim_loop.py
@@ -121,10 +131,11 @@ When voice capture is on the ESP32 (not the Pi), the Pi runs a WebSocket voice s
 
 2. **Standalone voice server** (no AuraBot, echo only):
 
+   From project root:
    ```bash
-   cd backend
-   python voice_ws_server.py
+   python -m backend.voice.voice_ws_server
    ```
+   Or from `backend/`: `python -c "from backend.voice.voice_ws_server import run_voice_server; run_voice_server()"`  
    Listens on `0.0.0.0:8765`, path `/voice`; replies "You said: …" for testing.
 
 3. **On ESP32**: Enable voice session and set the Pi5 URI:
@@ -143,8 +154,7 @@ When voice capture is on the ESP32 (not the Pi), the Pi runs a WebSocket voice s
   `Voice pipeline latency: stt=420 ms response=890 ms tts=1100 ms total=2410 ms`
 - **Log file:** To append per-turn latency to a file (e.g. for reporting or averaging), set `VOICE_LATENCY_LOG=1` (writes to `backend/logs/voice_pipeline_latency.log`) or `VOICE_LATENCY_LOG=/path/to/file.log`:
   ```bash
-  cd backend
-  VOICE_LATENCY_LOG=1 python sim_loop.py
+  VOICE_LATENCY_LOG=1 python -m backend
   ```
   Each line in the log looks like:  
   `[2026-02-26T12:00:00Z] pipeline_latency stt_ms=420 response_ms=890 tts_ms=1100 total_ms=2410 transcript='hello'`
@@ -193,17 +203,27 @@ AuraBot: Goodbye! Remember to stretch often.
 AuraBot/
 ├── backend/
 │   ├── sim_loop.py              # Main loop, AuraBot class, MQTT + dashboard startup
-│   ├── stt.py                   # Speech-to-Text
-│   ├── tts.py                   # Text-to-Speech
-│   ├── logger.py                # Conversation and MQTT logging
-│   ├── response_handler.py      # Response generation and command routing
-│   ├── timer_manager.py         # Timer management and notifications
-│   ├── timer_parser.py          # Natural language timer parsing
-│   ├── session_timer.py         # Session time tracking
-│   ├── wellness_timer_trigger.py # Auto wellness breaks from sitting time
-│   ├── mqtt_api.py              # MQTT message handling, presence, control
-│   ├── mqtt_integration.py      # MQTT client lifecycle and routing
-│   └── dashboard_api.py         # FastAPI dashboard (status, sessions, control)
+│   ├── core/                    # Shared utilities
+│   │   └── logger.py            # Conversation and MQTT logging
+│   ├── llm/                     # Conversation & response routing
+│   │   ├── llm_client.py       # Gemini / Ollama clients
+│   │   └── response_handler.py # Exit, timer, LLM, keyword routing
+│   ├── timer/                   # Timers and wellness
+│   │   ├── session_timer.py     # Session time tracking
+│   │   ├── timer_parser.py      # Natural language timer parsing
+│   │   ├── timer_manager.py     # Timer management and notifications
+│   │   └── wellness_timer_trigger.py # Auto wellness breaks
+│   ├── voice/                   # Speech and WebSocket
+│   │   ├── stt.py               # Speech-to-Text
+│   │   ├── tts.py               # Text-to-Speech
+│   │   └── voice_ws_server.py  # Voice WebSocket (ESP32 ↔ Pi)
+│   ├── mqtt/                    # MQTT integration
+│   │   ├── mqtt_api.py          # Message handling, presence, control
+│   │   └── mqtt_integration.py # Client lifecycle and routing
+│   ├── api/                     # HTTP API
+│   │   └── dashboard_api.py     # FastAPI dashboard (status, sessions, control)
+│   └── vision/                  # Camera presence
+│       └── vision_integration.py # Person detection → MQTT
 ├── dashboard/
 │   ├── index.html               # Web dashboard UI
 │   ├── app.js                   # Dashboard logic
@@ -228,19 +248,28 @@ AuraBot/
 
 ## Modules
 
-### Backend Core
+### Backend (by feature)
 
-| Module | Description |
-|--------|-------------|
+| Package / module | Description |
+|------------------|-------------|
 | `sim_loop.py` | Main loop, AuraBot class; starts MQTT, dashboard, and voice flow |
-| `stt.py` | Speech-to-Text (Google API, ambient noise calibration) |
-| `tts.py` | Text-to-Speech (macOS `say`, espeak-ng on Pi, pyttsx3 fallback) |
-| `response_handler.py` | Keyword responses, timer routing, wellness interactions |
-| `timer_manager.py` | Multiple concurrent timers, TTS notifications, named timers |
-| `timer_parser.py` | Natural language timer parsing (durations, names) |
-| `session_timer.py` | Sitting time with pause/resume, JSON session history |
-| `wellness_timer_trigger.py` | Auto wellness breaks when sitting exceeds threshold |
-| `logger.py` | Conversation and MQTT logging with category routing |
+| **core** | |
+| `core/logger.py` | Conversation and MQTT logging with category routing |
+| **llm** | |
+| `llm/llm_client.py` | Gemini / Ollama LLM clients |
+| `llm/response_handler.py` | Keyword responses, timer routing, exit, LLM fallback |
+| **timer** | |
+| `timer/timer_manager.py` | Multiple concurrent timers, TTS notifications, named timers |
+| `timer/timer_parser.py` | Natural language timer parsing (durations, names) |
+| `timer/session_timer.py` | Sitting time with pause/resume, JSON session history |
+| `timer/wellness_timer_trigger.py` | Auto wellness breaks when sitting exceeds threshold |
+| **voice** | |
+| `voice/stt.py` | Speech-to-Text (Google API, ambient noise calibration) |
+| `voice/tts.py` | Text-to-Speech (macOS `say`, espeak-ng on Pi, pyttsx3 fallback) |
+| `voice/voice_ws_server.py` | Voice WebSocket server (ESP32 ↔ Pi, Opus) |
+| **mqtt** | MQTT client, API, and sensor routing |
+| **api** | FastAPI dashboard (status, sessions, control) |
+| **vision** | Camera person detection feeding presence into MQTT |
 
 ### MQTT & Dashboard
 

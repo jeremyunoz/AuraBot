@@ -6,9 +6,9 @@ Structured API for handling MQTT messages and integrating with AuraBot functiona
 import threading
 import time
 from typing import Dict, Optional
-from wellness_timer_trigger import WellnessTimerTrigger
-from timer_manager import TimerManager
-from logger import AuraBotLogger, LogCategory
+from backend.timer.wellness_timer_trigger import WellnessTimerTrigger
+from backend.timer.timer_manager import TimerManager
+from backend.core.logger import AuraBotLogger, LogCategory
 
 
 class MQTTAPI:

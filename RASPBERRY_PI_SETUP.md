@@ -102,6 +102,7 @@ MQTT "Not authorized" errors mean the broker requires authentication. Use the sa
 ```bash
 cd /home/jzunoz/projects/AuraBot/backend
 python3 sim_loop.py
+# Or from project root: python3 -m backend
 ```
 
 The application will automatically:

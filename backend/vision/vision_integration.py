@@ -99,7 +99,8 @@ def start_vision_integration(
             aurabot.logger.log_general("Vision integration skipped: MQTT API not available", "WARNING")
         return None, None
 
-    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    # backend/vision/vision_integration.py -> backend root is parent of vision
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     model_path, fallback_path = _resolve_vision_paths(backend_dir, model_name, fallback_model)
     stop_event = threading.Event()
     ready_event = threading.Event()

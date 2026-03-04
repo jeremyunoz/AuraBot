@@ -10,10 +10,8 @@ Priority chain:
 """
 
 from typing import Optional, Dict, Tuple
-try:
-    from .timer_parser import TimerParser
-except ImportError:
-    from timer_parser import TimerParser
+
+from backend.timer.timer_parser import TimerParser
 
 
 class ResponseHandler:
@@ -239,4 +237,3 @@ class ResponseHandler:
             del self.responses[keyword_lower]
             return True
         return False
-

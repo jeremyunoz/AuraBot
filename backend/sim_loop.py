@@ -2,27 +2,34 @@
 Main simulation loop for AuraBot chatbot.
 Handles conversation flow, speech recognition, and text-to-speech interactions.
 """
+import os
+import sys
 
-from tts import TTS
-from logger import AuraBotLogger, ConversationLogger
-from response_handler import ResponseHandler
-from llm_client import (
+# Ensure project root is on path so "backend" package resolves (e.g. when run as python sim_loop.py from backend/)
+_backend_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.dirname(_backend_dir)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from time import sleep
+from typing import Optional, Dict, List
+
+from dotenv import load_dotenv
+
+from backend.core.logger import AuraBotLogger, ConversationLogger
+from backend.llm import (
+    ResponseHandler,
     LLMClient,
     OllamaLLMClient,
     HybridLLMClient,
     build_gemini_profile_from_env,
     build_ollama_profile_from_env,
 )
-from timer_manager import TimerManager
-from wellness_timer_trigger import WellnessTimerTrigger
-from time import sleep
-from typing import Optional, Dict, List
-from mqtt_api import MQTTAPI
-from mqtt_integration import MQTTIntegration, TTSWithMQTT
-from vision_integration import start_vision_integration
-from dashboard_api import run_dashboard
-from dotenv import load_dotenv
-import os
+from backend.mqtt.mqtt_api import MQTTAPI
+from backend.mqtt.mqtt_integration import MQTTIntegration, TTSWithMQTT
+from backend.timer import TimerManager, WellnessTimerTrigger
+from backend.vision.vision_integration import start_vision_integration
+from backend.voice.tts import TTS
 import traceback
 
 # Load environment variables
@@ -568,6 +575,16 @@ def main():
 
     # Start dashboard in background thread
     dashboard_port = int(os.getenv("DASHBOARD_PORT", "8000"))
+    try:
+        from backend.api.dashboard_api import run_dashboard
+    except ModuleNotFoundError as e:
+        if "fastapi" in str(e).lower() or "uvicorn" in str(e).lower():
+            raise SystemExit(
+                "Dashboard requires fastapi and uvicorn. Install with:\n"
+                "  pip install fastapi 'uvicorn[standard]'\n"
+                "Or install all deps: pip install -r requirements.txt"
+            ) from e
+        raise
     dashboard_thread = run_dashboard(bot, host="0.0.0.0", port=dashboard_port)
     bot.logger.log_general(
         f"Dashboard started at http://0.0.0.0:{dashboard_port}",
@@ -575,10 +592,7 @@ def main():
         metadata={"port": dashboard_port, "local_url": f"http://localhost:{dashboard_port}"}
     )
 
-    try:
-        from voice_ws_server import app as voice_ws_app, run_voice_server
-    except ImportError:
-        from backend.voice_ws_server import app as voice_ws_app, run_voice_server
+    from backend.voice.voice_ws_server import app as voice_ws_app, run_voice_server
     bot.start_services()
     voice_ws_app.state.aurabot = bot
     bot.logger.log_general(

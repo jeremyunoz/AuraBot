@@ -16,8 +16,8 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Resolve project root for dashboard static files
-_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+# Resolve project root for dashboard static files (api is backend/api/)
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PROJECT_ROOT = os.path.dirname(_BACKEND_DIR)
 _DASHBOARD_DIR = os.path.join(_PROJECT_ROOT, "dashboard")
 _DASHBOARD_LOG_DIR = os.path.join(_PROJECT_ROOT, "logs")

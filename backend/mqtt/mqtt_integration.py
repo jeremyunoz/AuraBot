@@ -15,13 +15,10 @@ logger = logging.getLogger(__name__)
 
 # Optional voice WebSocket integration: when available, TTS can go over WS (online) instead of MQTT (offline on ESP32).
 try:
-    from voice_ws_server import is_voice_client_connected, enqueue_tts_text
+    from backend.voice.voice_ws_server import is_voice_client_connected, enqueue_tts_text
 except ImportError:
-    try:
-        from backend.voice_ws_server import is_voice_client_connected, enqueue_tts_text
-    except ImportError:
-        is_voice_client_connected = lambda: False
-        enqueue_tts_text = lambda _: False
+    is_voice_client_connected = lambda: False
+    enqueue_tts_text = lambda _: False
 
 
 class TTSWithMQTT:

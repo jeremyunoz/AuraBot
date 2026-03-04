@@ -6,11 +6,9 @@ Automatically creates wellness timers based on session time thresholds.
 import threading
 import time
 from typing import Optional, Callable
-from timer_manager import TimerManager
-try:
-    from .logger import AuraBotLogger
-except ImportError:
-    from logger import AuraBotLogger
+
+from backend.core.logger import AuraBotLogger
+from backend.timer.timer_manager import TimerManager
 
 
 class WellnessTimerTrigger:
@@ -407,4 +405,3 @@ class WellnessTimerTrigger:
             self.pause_timeout_seconds = pause_timeout_seconds
             if self.pause_timeout_seconds <= 0:
                 self.pause_timeout_seconds = None
-

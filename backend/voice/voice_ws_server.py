@@ -90,7 +90,8 @@ TTS_PCM_GAIN = float(os.environ.get("VOICE_TTS_PCM_GAIN", "0.90"))
 def _get_voice_latency_log_setting() -> str:
     return os.environ.get("VOICE_LATENCY_LOG", "")
 
-_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+# When run from backend/voice/voice_ws_server.py, backend root is parent of voice
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOGS_DIR = os.path.join(_BACKEND_DIR, "logs")
 _DEFAULT_LATENCY_LOG_PATH = os.path.join(_LOGS_DIR, "voice_pipeline_latency.log")
 
@@ -125,8 +126,8 @@ except Exception as e:
     logger.warning("opuslib not available (install libopus-dev and opuslib): %s", e)
     _OPUS_AVAILABLE = False
 
-from stt import STT
-from tts import TTS
+from backend.voice.stt import STT
+from backend.voice.tts import TTS
 
 app = FastAPI(title="AuraBot Voice WS", version="0.2.0")
 
@@ -474,7 +475,7 @@ async def voice_websocket(websocket: WebSocket):
 
 def run_voice_server(host: str = "0.0.0.0", port: int = 8765):
     import uvicorn
-    from dashboard_api import UVICORN_LOG_CONFIG_NO_ACCESS
+    from backend.api.dashboard_api import UVICORN_LOG_CONFIG_NO_ACCESS
     uvicorn.run(
         app, host=host, port=port, log_level="info",
         access_log=False, log_config=UVICORN_LOG_CONFIG_NO_ACCESS,

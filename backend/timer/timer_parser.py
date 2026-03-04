@@ -333,4 +333,3 @@ class TimerParser:
             return f"{parts[0]} and {parts[1]}"
         else:
             return f"{', '.join(parts[:-1])} and {parts[-1]}"
-

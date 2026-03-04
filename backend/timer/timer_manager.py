@@ -7,12 +7,9 @@ import threading
 import time
 from typing import Dict, List, Optional
 from uuid import uuid4
-try:
-    from .session_timer import SessionTimer
-    from .logger import AuraBotLogger
-except ImportError:
-    from session_timer import SessionTimer
-    from logger import AuraBotLogger
+
+from backend.core.logger import AuraBotLogger
+from backend.timer.session_timer import SessionTimer
 
 
 class TimerManager:
@@ -320,4 +317,3 @@ class TimerManager:
             return f"{parts[0]} and {parts[1]}"
         else:
             return f"{', '.join(parts[:-1])}, and {parts[-1]}"
-
