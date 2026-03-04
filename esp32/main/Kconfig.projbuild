@@ -40,20 +40,7 @@ menu "AuraBot Configuration"
         help
             Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
 
-    menu "PIR Sensor"
-        config PIR_GPIO
-            int "PIR GPIO"
-            default 4
-            help
-                GPIO pin for the PIR sensor input.
-
-        config PIR_WARMUP_MS
-            int "PIR warmup (ms)"
-            default 2000
-            help
-                Warmup delay before PIR data is considered valid.
-    endmenu
-
+    
     choice ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD
         prompt "WiFi Scan auth mode threshold"
         default ESP_WIFI_AUTH_WPA2_PSK

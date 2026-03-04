@@ -1,34 +1,60 @@
 #pragma once
 
+/*
+ * DEPRECATED — not compiled into the firmware build (omitted from CMakeLists.txt SRCS).
+ *
+ * Kept as a reference in case PIR-based motion detection is re-introduced.
+ * On AuraBot the default firmware no longer uses a PIR sensor; motion handling
+ * has moved to the Pi 5 side.  If you want to re-enable this driver:
+ *
+ *   1. Add "pir.c" back to the SRCS list in main/CMakeLists.txt.
+ *   2. Wire pir_int_interrupt() into app_main() (see example below).
+ *   3. Restore pir_task() in main.c and register it with xTaskCreate().
+ *
+ * Example integration (main.c sketch):
+ *
+ *     #include "sensors/pir.h"
+ *
+ *     #define PIR_EVENT_BIT   BIT0
+ *     #define PIR_GPIO        GPIO_NUM_4
+ *
+ *     static EventGroupHandle_t s_pir_evt;
+ *
+ *     static void pir_task(void *arg)
+ *     {
+ *         (void)arg;
+ *         while (1) {
+ *             xEventGroupWaitBits(s_pir_evt, PIR_EVENT_BIT,
+ *                                 pdTRUE, pdFALSE, portMAX_DELAY);
+ *             uint32_t count = pir_get_count();
+ *             if (s_state == SYS_STATE_ACTIVE && mqtt_is_connected()) {
+ *                 char msg[128];
+ *                 snprintf(msg, sizeof(msg),
+ *                          "{\"src\":\"esp32\",\"motion\":1,\"count\":%u}",
+ *                          (unsigned)count);
+ *                 mqtt_publish("aurabot/sensors", msg, 1, 0);
+ *             }
+ *         }
+ *     }
+ *
+ *     // Inside app_main():
+ *     s_pir_evt = xEventGroupCreate();
+ *     pir_t pir = { .pin = PIR_GPIO };
+ *     pir_int_interrupt(&pir, s_pir_evt, PIR_EVENT_BIT);
+ *     xTaskCreate(pir_task, "pir_task", 2048, NULL, 5, NULL);
+ */
+
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include <stdint.h>
 
-/*
- * pir_t：描述一个 PIR 传感器
- * 目前只需要一个 GPIO 引脚
- */
 typedef struct {
-    gpio_num_t pin; // PIR传感器连接的GPIO引脚
+    gpio_num_t pin;
 } pir_t;
-
-/*
- * pir_int_interrupt：
- * - 把 PIR GPIO 配置成"中断输入"
- * - 当 PIR 触发时：
- *     → 向 event_group 里设置一个 bit
- *
- * 参数解释：
- * pir            : PIR 的配置（主要是 GPIO）
- * event_group    : 要通知的 EventGroup（系统公共状态）
- * bit_to_set     : PIR 触发时要置 1 的那个 bit
- */
 
 esp_err_t pir_int_interrupt(const pir_t *pir, EventGroupHandle_t event_group, EventBits_t bit_to_set);
 
-/* Get current PIR trigger count */
 uint32_t pir_get_count(void);
 
-/* Reset PIR trigger count to zero */
 void pir_reset_count(void);
