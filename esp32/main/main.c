@@ -15,7 +15,6 @@
 #include "audio/wakeword.h"
 #include "network/wifi_connect.h"
 #include "network/mqtt.h"
-#include "sensors/pir.h"
 #include "driver/gpio.h"
 #include "motion/action.h"
 #include "motion/servo.h"
@@ -36,20 +35,10 @@ typedef enum {
 } sys_state_t;
 
 #define STATE_TASK_STACK_SIZE    4096
-#define PIR_TASK_STACK_SIZE     4096
-#define PIR_WARMUP_TASK_STACK   1536
-#define EVT_QUEUE_LEN           10
-#define PIR_EVENT_BIT           BIT0
-#define READY_PIR_BIT           BIT1
-#define READY_WS_BIT            BIT2
-#define READY_BOTH_TIMEOUT_MS   20000
+#define EVT_QUEUE_LEN            10
 
 static QueueHandle_t s_evt_queue = NULL;
-static EventGroupHandle_t s_pir_evt = NULL;
-static EventGroupHandle_t s_ready_evt = NULL;  /* used in enter_waking: PIR + WS ready */
-static volatile bool s_ready_cancelled = false; /* set before delete so pir_warmup_task skips SetBits */
 static sys_state_t s_state = SYS_STATE_IDLE;
-static bool s_pir_configured = false;
 
 static const char *state_to_str(sys_state_t state)
 {
@@ -72,13 +61,6 @@ static void publish_state(sys_state_t state)
     char msg[128];
     snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"state\":\"%s\"}", state_to_str(state));
     (void)mqtt_publish("aurabot/status", msg, 1, 1);
-}
-
-static void publish_pir_status(const char *status)
-{
-    char msg[128];
-    snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"pir\":\"%s\"}", status);
-    (void)mqtt_publish("aurabot/sensors", msg, 1, 0);
 }
 
 static roboeyes_state_t sys_to_eye_state(sys_state_t s)
@@ -109,35 +91,9 @@ static void set_state(sys_state_t state)
     action_post(sys_to_action(state));
     action_set_user_control(state == SYS_STATE_ACTIVE);
     publish_state(state);
-    /* Voice session is started in enter_waking() (parallel with PIR warmup); not here */
     ESP_LOGI(TAG, "State -> %s", state_to_str(state));
 }
 
-static void pir_task(void *arg)
-{
-    (void)arg;
-    while (1) {
-        if (!s_pir_evt) {
-            vTaskDelay(pdMS_TO_TICKS(200));
-            continue;
-        }
-
-        xEventGroupWaitBits(
-            s_pir_evt,
-            PIR_EVENT_BIT,
-            pdTRUE,
-            pdFALSE,
-            portMAX_DELAY
-        );
-
-        if (s_state == SYS_STATE_ACTIVE && mqtt_is_connected()) {
-            char msg[128];
-            uint32_t count = pir_get_count();
-            snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"motion\":1,\"count\":%u}", (unsigned)count);
-            (void)mqtt_publish("aurabot/sensors", msg, 1, 0);
-        }
-    }
-}
 
 static void enter_sleeping(void)
 {
@@ -160,39 +116,6 @@ static void enter_sleeping(void)
     ESP_LOGI(TAG, "State -> %s", state_to_str(s_state));
 }
 
-/* Call before deleting s_ready_evt so pir_warmup_task (if still in delay) won't touch it after free. */
-static void delete_ready_evt_safe(void)
-{
-    s_ready_cancelled = true;
-    vTaskDelay(pdMS_TO_TICKS(50)); /* let pir_warmup_task wake, see flag, and exit without SetBits */
-    if (s_ready_evt) {
-        vEventGroupDelete(s_ready_evt);
-        s_ready_evt = NULL;
-    }
-}
-
-#if CONFIG_VOICE_SESSION_ENABLE
-static void ws_ready_cb(void *arg)
-{
-    (void)arg;
-    if (s_ready_evt) {
-        xEventGroupSetBits(s_ready_evt, READY_WS_BIT);
-    }
-}
-#endif
-
-static void pir_warmup_task(void *arg)
-{
-    EventGroupHandle_t ready = (EventGroupHandle_t)arg;
-    vTaskDelay(pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS));
-    /* Skip SetBits if main already timed out and deleted/freed the event group (avoids use-after-free panic). */
-    if (s_ready_cancelled || !ready) {
-        vTaskDelete(NULL);
-        return;
-    }
-    xEventGroupSetBits(ready, READY_PIR_BIT);
-    vTaskDelete(NULL);
-}
 
 static void enter_waking(void)
 {
@@ -212,33 +135,9 @@ static void enter_waking(void)
     }
     ESP_LOGI(TAG, "WiFi connected");
 
-    /* Event group for "ready": PIR warmup and WebSocket connected (both in parallel with MQTT) */
-    s_ready_cancelled = false;
-    s_ready_evt = xEventGroupCreate();
-    if (!s_ready_evt) {
-        ESP_LOGE(TAG, "Failed to create ready event group");
-        enter_sleeping();
-        return;
-    }
-    xEventGroupClearBits(s_ready_evt, READY_PIR_BIT | READY_WS_BIT);
-
-    /* PIR hardware + start warmup task (runs in parallel from here) */
-    if (!s_pir_evt) {
-        s_pir_evt = xEventGroupCreate();
-    }
-    if (s_pir_evt && !s_pir_configured) {
-        pir_t pir = { .pin = (gpio_num_t)CONFIG_PIR_GPIO };
-        if (pir_int_interrupt(&pir, s_pir_evt, PIR_EVENT_BIT) == ESP_OK) {
-            s_pir_configured = true;
-        }
-    }
-    xTaskCreate(pir_warmup_task, "pir_warmup", PIR_WARMUP_TASK_STACK, s_ready_evt, 4, NULL);
-    ESP_LOGI(TAG, "PIR warmup started (parallel)");
-
 #if CONFIG_MQTT_ENABLE
     if (mqtt_start() != ESP_OK) {
         ESP_LOGE(TAG, "MQTT start failed");
-        delete_ready_evt_safe();
         enter_sleeping();
         return;
     }
@@ -250,7 +149,6 @@ static void enter_waking(void)
     }
     if (!mqtt_is_connected()) {
         ESP_LOGE(TAG, "MQTT connect timeout");
-        delete_ready_evt_safe();
         enter_sleeping();
         return;
     }
@@ -258,7 +156,7 @@ static void enter_waking(void)
 
     (void)mqtt_publish(
         "aurabot/status",
-        "{\"src\":\"esp32\",\"state\":\"WAKING\",\"wifi\":\"up\",\"mqtt\":\"up\",\"pir\":\"warming\"}",
+        "{\"src\":\"esp32\",\"state\":\"WAKING\",\"wifi\":\"up\",\"mqtt\":\"up\"}",
         1,
         1
     );
@@ -267,52 +165,17 @@ static void enter_waking(void)
 #endif
 
 #if CONFIG_VOICE_SESSION_ENABLE
-    voice_ws_set_connected_callback(ws_ready_cb, NULL);
     esp_err_t start_err = voice_session_start();
     if (start_err != ESP_OK) {
         ESP_LOGE(TAG, "voice_session_start failed %s", esp_err_to_name(start_err));
-        delete_ready_evt_safe();
         enter_sleeping();
         return;
     }
-    ESP_LOGI(TAG, "voice_session_start done, waiting for PIR + WebSocket ready");
-
-    EventBits_t bits = xEventGroupWaitBits(
-        s_ready_evt,
-        READY_PIR_BIT | READY_WS_BIT,
-        pdTRUE,
-        pdTRUE,
-        pdMS_TO_TICKS(READY_BOTH_TIMEOUT_MS)
-    );
-    delete_ready_evt_safe();
-
-    if ((bits & (READY_PIR_BIT | READY_WS_BIT)) != (READY_PIR_BIT | READY_WS_BIT)) {
-        ESP_LOGE(TAG, "Timeout waiting for PIR warmup + WebSocket (got 0x%lx)", (unsigned long)bits);
-        voice_session_stop();
-        enter_sleeping();
-        return;
-    }
-    ESP_LOGI(TAG, "PIR warmup + WebSocket ready, going ACTIVE");
+    ESP_LOGI(TAG, "voice_session_start done, going ACTIVE");
 #else
-    /* No voice session: wait only for PIR warmup */
-    EventBits_t bits = xEventGroupWaitBits(
-        s_ready_evt,
-        READY_PIR_BIT,
-        pdTRUE,
-        pdTRUE,
-        pdMS_TO_TICKS(CONFIG_PIR_WARMUP_MS + 2000)
-    );
-    delete_ready_evt_safe();
-    if ((bits & READY_PIR_BIT) == 0) {
-        ESP_LOGE(TAG, "Timeout waiting for PIR warmup");
-        enter_sleeping();
-        return;
-    }
-    ESP_LOGI(TAG, "PIR warmup ready, going ACTIVE");
+    ESP_LOGI(TAG, "WiFi/MQTT ready, going ACTIVE (no voice session)");
 #endif
 
-    pir_reset_count();
-    publish_pir_status("warm");
     set_state(SYS_STATE_ACTIVE);
 }
 
@@ -401,13 +264,6 @@ void app_main(void)
 #if CONFIG_MQTT_ENABLE
     mqtt_set_event_queue(s_evt_queue);
 #endif
-
-    s_pir_evt = xEventGroupCreate();
-    if (!s_pir_evt) {
-        ESP_LOGW(TAG, "Failed to create PIR event group");
-    } else {
-        xTaskCreate(pir_task, "pir_task", PIR_TASK_STACK_SIZE, NULL, 5, NULL);
-    }
 
     /* Start continuous wake-word detection */
     ret = wakeword_start();
