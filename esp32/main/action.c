@@ -41,6 +41,8 @@ static action_id_t    s_last_action         = ACTION_STAND;
 
 /** When false, action_post_user() silently drops commands. */
 static bool           s_user_control        = false;
+/** Tracks the most recent action posted to the queue. */
+static volatile action_id_t s_current_cmd   = ACTION_STAND;
 
 #define ACTION_TASK_STACK  4096
 #define ACTION_TASK_PRIO   5
@@ -391,6 +393,7 @@ void action_task_start(void)
 void action_post(action_id_t id)
 {
     if (!s_action_queue) return;
+    s_current_cmd = id;
     s_cancel = true;                        /* interrupt running action */
     (void)xQueueOverwrite(s_action_queue, &id);
 }
@@ -408,6 +411,16 @@ void action_set_user_control(bool enabled)
 {
     s_user_control = enabled;
     ESP_LOGI(TAG, "User control %s", enabled ? "ENABLED" : "DISABLED");
+}
+
+bool action_user_control_enabled(void)
+{
+    return s_user_control;
+}
+
+action_id_t action_get_current_command(void)
+{
+    return s_current_cmd;
 }
 
 action_id_t action_from_string(const char *name)

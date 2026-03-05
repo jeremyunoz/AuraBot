@@ -22,6 +22,7 @@
 #include "system/system_events.h"
 #include "display/lcd_lvgl.h"
 #include "display/robot_eyes.h"
+#include "sensors/usonic.h"
 #include "voice/voice_session.h"
 #include "voice/voice_ws.h"
 
@@ -35,6 +36,7 @@ typedef enum {
 } sys_state_t;
 
 #define STATE_TASK_STACK_SIZE    4096
+#define USONIC_TASK_STACK_SIZE   3072
 #define EVT_QUEUE_LEN            10
 
 static QueueHandle_t s_evt_queue = NULL;
@@ -299,6 +301,7 @@ void app_main(void)
     set_state(SYS_STATE_IDLE);
 
     xTaskCreate(state_task, "state_task", STATE_TASK_STACK_SIZE, NULL, 6, NULL);
+    xTaskCreate(usonic_task, "usonic_task", USONIC_TASK_STACK_SIZE, NULL, 5, NULL);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));

@@ -67,6 +67,16 @@ void action_post_user(action_id_t id);
 void action_set_user_control(bool enabled);
 
 /**
+ * @brief Return whether user movement commands are currently allowed.
+ */
+bool action_user_control_enabled(void);
+
+/**
+ * @brief Return the latest posted action command.
+ */
+action_id_t action_get_current_command(void);
+
+/**
  * @brief Parse an action name string to its enum value.
  *
  * Recognised strings: "stand", "walk", "back", "lay_down",
