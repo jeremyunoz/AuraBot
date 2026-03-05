@@ -21,12 +21,26 @@
 
 #include <string.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/stream_buffer.h"
+#include "freertos/idf_additions.h"
 #include "opus.h"
 #include "cJSON.h"
+
+/*
+ * Large voice buffers go to PSRAM to avoid exhausting internal DRAM.
+ * xStreamBufferCreateWithCaps / xQueueCreateWithCaps are IDF 5.x extensions
+ * that let FreeRTOS objects back their storage with a specific heap capability.
+ * Falls back to internal RAM when SPIRAM is not present.
+ */
+#if CONFIG_SPIRAM
+#  define VOICE_ALLOC_CAPS  (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#else
+#  define VOICE_ALLOC_CAPS  (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#endif
 
 static const char *TAG = "voice_conversation";
 
@@ -210,9 +224,9 @@ static void create_tasks_and_buffers(void)
 {
     if (s_pcm_stream != NULL) return;
 
-    s_pcm_stream = xStreamBufferCreate(PCM_BUF_SIZE, FRAME_BYTES);
-    s_playback_stream = xStreamBufferCreate(PLAYBACK_BUF_SIZE, 1);
-    s_decoder_queue = xQueueCreate(DECODER_QUEUE_LEN, sizeof(opus_packet_t));
+    s_pcm_stream      = xStreamBufferCreate(PCM_BUF_SIZE, FRAME_BYTES);
+    s_playback_stream = xStreamBufferCreateWithCaps(PLAYBACK_BUF_SIZE, 1, VOICE_ALLOC_CAPS);
+    s_decoder_queue   = xQueueCreateWithCaps(DECODER_QUEUE_LEN, sizeof(opus_packet_t), VOICE_ALLOC_CAPS);
     if (!s_pcm_stream || !s_playback_stream || !s_decoder_queue) {
         ESP_LOGE(TAG, "Failed to create stream buffers or decoder queue");
         if (s_pcm_stream) vStreamBufferDelete(s_pcm_stream);
