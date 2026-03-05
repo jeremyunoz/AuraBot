@@ -74,7 +74,7 @@ static const char *TAG = "lcd_lvgl";
 #define LVGL_TASK_MAX_DELAY_MS         500
 #define LVGL_TASK_MIN_DELAY_MS         1
 #define LVGL_TASK_STACK_SIZE           (6 * 1024)
-#define LVGL_TASK_PRIORITY             2
+#define LVGL_TASK_PRIORITY             5
 
 /* ========================================================================== */
 /* LVGL API lock                                                              */
