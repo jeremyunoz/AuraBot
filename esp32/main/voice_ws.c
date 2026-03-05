@@ -105,6 +105,8 @@ esp_err_t voice_ws_start(const char *uri)
         return ESP_OK;
     }
 
+    s_disconnect_handled = false;
+
     esp_websocket_client_config_t ws_cfg = {
         .uri = uri,
         .buffer_size = 2048,
