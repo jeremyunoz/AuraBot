@@ -236,7 +236,7 @@ static inline int lerp_snap(int current, int target) {
      lv_canvas_fill_bg(canvas, BG_COLOR, LV_OPA_COVER);
      lv_color_t c = EYE_COLOR;
      int mid_y          = GREET_H / 2;
-     int line_thickness = 3;
+    int line_thickness = 6;
  
      for (int py = 0; py < GREET_H; py++) {
          int x_tip  = (dir == 1) ? GREET_W - 1 : 0;
