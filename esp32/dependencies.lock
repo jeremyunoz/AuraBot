@@ -10,6 +10,48 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.0.5
+  esp-idf-lib/esp_idf_lib_helpers:
+    component_hash: 
+      689853bb8993434f9556af0f2816e808bf77b5d22100144b21f3519993daf237
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 1.4.0
+  esp-idf-lib/ultrasonic:
+    component_hash: 
+      da9c0899db56f6a994090e6d8257dc11a2daae241cf9368da7d06b95b7d0ee72
+    dependencies:
+    - name: esp-idf-lib/esp_idf_lib_helpers
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 1.1.0
   espressif/dl_fft:
     component_hash: 
       7dadbd644c0d7ba4733cc3726ec4cff6edf27b043725e1115861dec1609a3d28
@@ -79,7 +121,7 @@ dependencies:
     version: 1.5.4
   espressif/esp_hosted:
     component_hash: 
-      5e1f8af8b51b47714eafb30c59bac952d6abc03125c01cb6a970f368d1e1cb83
+      9eea9ce83444a412b4a02311f787f3639a5d29fe67e6df83863010dd68ab250b
     dependencies:
     - name: idf
       require: private
@@ -87,7 +129,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 2.11.7
+    version: 2.12.0
   espressif/esp_serial_slave_link:
     component_hash: 
       ac1776806de0a6e371c84e87898bb983e19ce62aa7f1e2e5c4a3b0234a575d2c
@@ -190,6 +232,7 @@ dependencies:
     version: 9.5.0
 direct_dependencies:
 - 78/esp-opus
+- esp-idf-lib/ultrasonic
 - espressif/esp-sr
 - espressif/esp_codec_dev
 - espressif/esp_hosted
@@ -199,6 +242,6 @@ direct_dependencies:
 - espressif/servo
 - jmattsson/picotts
 - lvgl/lvgl
-manifest_hash: 0f5982db9a0f0f8e8127698476a48315fb2365ca913b31e5766a63b227e99f24
+manifest_hash: 54d698417477fe1ce395e92dbc2984e2e9c4329ca711324118e08757e402df40
 target: esp32p4
 version: 2.0.0
