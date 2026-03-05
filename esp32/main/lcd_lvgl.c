@@ -109,10 +109,14 @@ static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
                                     void *user_ctx)
 {
+    (void)panel_io;
+    (void)edata;
     lv_display_t *disp = (lv_display_t *)user_ctx;
     lv_display_flush_ready(disp);
     if (s_flush_done_sem != NULL) {
-        xSemaphoreGive(s_flush_done_sem);
+        BaseType_t hp_task_woken = pdFALSE;
+        xSemaphoreGiveFromISR(s_flush_done_sem, &hp_task_woken);
+        portYIELD_FROM_ISR(hp_task_woken);
     }
     return false;
 }
@@ -286,8 +290,8 @@ lv_display_t *lcd_lvgl_init(void)
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(display, lvgl_flush_cb);
 
-    /* Flush-wait callback: block on semaphore so CPU yields and task WDT is fed */
-    s_flush_done_sem = xSemaphoreCreateBinary();
+    /* Flush-wait callback: counting semaphore handles N flushes per frame. */
+    s_flush_done_sem = xSemaphoreCreateCounting(32, 0);
     assert(s_flush_done_sem != NULL);
     lv_display_set_flush_wait_cb(display, lvgl_flush_wait_cb);
 

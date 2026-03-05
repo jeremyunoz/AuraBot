@@ -39,6 +39,8 @@ typedef enum {
 
 static QueueHandle_t s_evt_queue = NULL;
 static sys_state_t s_state = SYS_STATE_IDLE;
+static TickType_t  s_active_since = 0;
+#define MIN_ACTIVE_FOR_SLEEP_MS  5000
 
 static const char *state_to_str(sys_state_t state)
 {
@@ -87,6 +89,9 @@ static action_id_t sys_to_action(sys_state_t s)
 static void set_state(sys_state_t state)
 {
     s_state = state;
+    if (state == SYS_STATE_ACTIVE) {
+        s_active_since = xTaskGetTickCount();
+    }
     roboeyes_set_state(sys_to_eye_state(state));
     action_post(sys_to_action(state));
     action_set_user_control(state == SYS_STATE_ACTIVE);
@@ -94,6 +99,21 @@ static void set_state(sys_state_t state)
     ESP_LOGI(TAG, "State -> %s", state_to_str(state));
 }
 
+
+static void enter_error_idle(void)
+{
+    voice_session_stop();
+#if CONFIG_MQTT_ENABLE
+    mqtt_stop();
+#endif
+    wifi_disconnect_sta();
+
+    s_state = SYS_STATE_IDLE;
+    roboeyes_set_state(EYE_STATE_IDLE);
+    action_post(ACTION_SIT);
+    action_set_user_control(false);
+    ESP_LOGI(TAG, "State -> %s (error)", state_to_str(s_state));
+}
 
 static void enter_sleeping(void)
 {
@@ -130,7 +150,7 @@ static void enter_waking(void)
 
     if (wifi_connect_sta(&cfg) != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connect failed");
-        enter_sleeping();
+        enter_error_idle();
         return;
     }
     ESP_LOGI(TAG, "WiFi connected");
@@ -138,7 +158,7 @@ static void enter_waking(void)
 #if CONFIG_MQTT_ENABLE
     if (mqtt_start() != ESP_OK) {
         ESP_LOGE(TAG, "MQTT start failed");
-        enter_sleeping();
+        enter_error_idle();
         return;
     }
 
@@ -149,7 +169,7 @@ static void enter_waking(void)
     }
     if (!mqtt_is_connected()) {
         ESP_LOGE(TAG, "MQTT connect timeout");
-        enter_sleeping();
+        enter_error_idle();
         return;
     }
     ESP_LOGI(TAG, "MQTT connected (waited %d ms)");
@@ -168,7 +188,7 @@ static void enter_waking(void)
     esp_err_t start_err = voice_session_start();
     if (start_err != ESP_OK) {
         ESP_LOGE(TAG, "voice_session_start failed %s", esp_err_to_name(start_err));
-        enter_sleeping();
+        enter_error_idle();
         return;
     }
     ESP_LOGI(TAG, "voice_session_start done, going ACTIVE");
@@ -198,7 +218,12 @@ static void state_task(void *arg)
 
         case SYS_STATE_ACTIVE:
             if (evt.id == SYS_EVT_SESSION_END) {
-                enter_sleeping();
+                TickType_t active_dur = xTaskGetTickCount() - s_active_since;
+                if (active_dur < pdMS_TO_TICKS(MIN_ACTIVE_FOR_SLEEP_MS)) {
+                    enter_error_idle();
+                } else {
+                    enter_sleeping();
+                }
             }
             break;
 
