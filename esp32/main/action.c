@@ -37,7 +37,7 @@ static QueueHandle_t  s_action_queue        = NULL;
 static volatile bool  s_cancel              = false;
 
 /** Tracks the last completed action (for transition logic in stand()). */
-static action_id_t    s_last_action         = ACTION_SIT
+static action_id_t    s_last_action         = ACTION_SIT;
 
 /** When false, action_post_user() silently drops commands. */
 static bool           s_user_control        = false;
@@ -119,6 +119,8 @@ void wave(void)
         FR_angle(60);
         delay_ms(350);
     }
+
+    action_post(ACTION_SIT);
 }
 
 /* -------------------------------------------------------------------------- */
