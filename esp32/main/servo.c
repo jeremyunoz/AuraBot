@@ -16,10 +16,10 @@
 /* -------------------------------------------------------------------------- */
 
 /** GPIO pins for each leg servo */
-#define SERVO_PIN_FL  29
-#define SERVO_PIN_FR  28
-#define SERVO_PIN_RL  3
-#define SERVO_PIN_RR  2
+#define SERVO_PIN_FL  31
+#define SERVO_PIN_FR  30
+#define SERVO_PIN_RL  29
+#define SERVO_PIN_RR  28
 
 /** Angle limits */
 #define ANGLE_MIN  0

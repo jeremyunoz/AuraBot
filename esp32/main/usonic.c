@@ -12,8 +12,8 @@
  * Keep ultrasonic off LCD pins:
  * lcd_lvgl.c uses GPIO21 (LCD DC) and GPIO20 (LCD CS).
  */
-#define USONIC_TRIGGER_PIN 4
-#define USONIC_ECHO_PIN 5
+#define USONIC_TRIGGER_PIN 32
+#define USONIC_ECHO_PIN 33
 
 #define USONIC_MAX_DISTANCE_M 1.00f
 #define USONIC_STOP_DISTANCE_M 0.10f
