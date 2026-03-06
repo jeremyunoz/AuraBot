@@ -282,6 +282,16 @@ main {
     margin-top: 8px;
 }
 
+.movement-note {
+    margin: 12px 0 14px;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.movement-controls .btn {
+    min-width: 110px;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     main {

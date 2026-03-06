@@ -4,6 +4,18 @@ const API_BASE = '/api';
 const POLL_INTERVAL = 2000; // 2 seconds
 
 let pollTimer = null;
+let movementEnabled = false;
+const MOVE_ACTIONS = [
+    'stand',
+    'walk',
+    'back',
+    'turn_left',
+    'turn_right',
+    'sit',
+    'lay_down',
+    'wave',
+    'swing',
+];
 
 // Format time in seconds to human-readable string
 function formatTime(seconds) {
@@ -139,6 +151,31 @@ function updateCameraStatus(online, enabled) {
     statusEl.className = `status-badge ${online ? 'connected' : 'disconnected'}`;
 }
 
+// Enable movement controls only when ESP32 user control is active
+function updateMovementControls(data) {
+    const esp32State = String(data.esp32_state || 'unknown').toUpperCase();
+    const userControlEnabled = Boolean(data.esp32_user_control_enabled);
+    const esp32Online = Boolean(data.esp32_online);
+    movementEnabled = userControlEnabled && esp32Online;
+
+    const stateEl = document.getElementById('esp32-state');
+    stateEl.textContent = esp32State;
+
+    const noteEl = document.getElementById('movement-note');
+    if (movementEnabled) {
+        noteEl.textContent = 'Movement controls are enabled.';
+    } else if (!esp32Online) {
+        noteEl.textContent = 'ESP32 is offline. Movement controls are disabled.';
+    } else {
+        noteEl.textContent = 'Movement controls are enabled only when ESP32 state is ACTIVE.';
+    }
+
+    MOVE_ACTIONS.forEach(action => {
+        const btn = document.getElementById(`btn-move-${action.replace(/_/g, '-')}`);
+        if (btn) btn.disabled = !movementEnabled;
+    });
+}
+
 // Fetch and update status
 async function fetchStatus() {
     try {
@@ -154,11 +191,17 @@ async function fetchStatus() {
         updateMQTTStatus(Boolean(data.mqtt_connected));
         updateESP32Status(Boolean(data.esp32_online));
         updateCameraStatus(Boolean(data.camera_online), data.camera_enabled === true);
+        updateMovementControls(data);
     } catch (error) {
         console.error('Error fetching status:', error);
         updateMQTTStatus(false);
         updateESP32Status(false);
         updateCameraStatus(false, false);
+        updateMovementControls({
+            esp32_state: 'unknown',
+            esp32_user_control_enabled: false,
+            esp32_online: false,
+        });
     }
 }
 
@@ -197,14 +240,17 @@ async function fetchSessions() {
 }
 
 // Send control command
-async function sendControl(cmd) {
+async function sendControl(cmd, params = null) {
     try {
         const response = await fetch(`${API_BASE}/control`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ cmd }),
+            body: JSON.stringify({
+                cmd,
+                ...(params ? { params } : {}),
+            }),
         });
         
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -221,6 +267,14 @@ async function sendControl(cmd) {
         console.error('Error sending control:', error);
         alert(`Error: ${error.message}`);
     }
+}
+
+async function sendMove(action) {
+    if (!movementEnabled) {
+        alert('Movement is only available while ESP32 is ACTIVE and online.');
+        return;
+    }
+    await sendControl('move', { action });
 }
 
 // Setup control buttons
@@ -243,6 +297,15 @@ function setupControls() {
                 fetchSessions(); // Refresh history
             });
         }
+    });
+
+    MOVE_ACTIONS.forEach(action => {
+        const btn = document.getElementById(`btn-move-${action.replace(/_/g, '-')}`);
+        if (!btn) return;
+        btn.disabled = true;
+        btn.addEventListener('click', () => {
+            sendMove(action);
+        });
     });
 }
 
