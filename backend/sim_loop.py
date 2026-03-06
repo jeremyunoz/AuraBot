@@ -27,6 +27,7 @@ from backend.llm import (
 )
 from backend.mqtt.mqtt_api import MQTTAPI
 from backend.mqtt.mqtt_integration import MQTTIntegration, TTSWithMQTT
+from backend.pir.pir_integration import start_pir_integration
 from backend.timer import TimerManager, WellnessTimerTrigger
 from backend.vision.vision_integration import start_vision_integration
 from backend.voice.tts import TTS
@@ -53,6 +54,10 @@ class AuraBot:
         custom_responses: Optional[Dict[str, str]] = None,
         enable_mqtt: bool = True,
         enable_vision: bool = False,
+        enable_pir_gpio: bool = False,
+        pir_gpio_pin: int = 17,
+        pir_poll_interval_seconds: float = 0.2,
+        pir_heartbeat_seconds: float = 15.0,
         enable_llm: bool = True,
         llm_backend: str = "gemini",
         gemini_api_key: Optional[str] = None,
@@ -77,6 +82,10 @@ class AuraBot:
             custom_responses: Optional custom response dictionary
             enable_mqtt: Whether to enable MQTT integration for sensor data
             enable_vision: Whether to use camera for presence (person detection); requires enable_mqtt
+            enable_pir_gpio: Whether to read a local PIR sensor from Raspberry Pi GPIO
+            pir_gpio_pin: Raspberry Pi BCM GPIO pin connected to PIR OUT
+            pir_poll_interval_seconds: PIR polling interval in seconds
+            pir_heartbeat_seconds: Max time between PIR publishes when state is unchanged
             enable_llm: Whether to enable LLM-powered conversation
             llm_backend: Deprecated alias for the primary LLM backend ("gemini" or "ollama").
             gemini_api_key: Google AI API key (or set GEMINI_API_KEY env var)
@@ -263,6 +272,13 @@ class AuraBot:
         self._enable_vision = enable_vision
         self._vision_stop_event = None
         self._vision_ready_event = None
+        self._enable_pir_gpio = enable_pir_gpio
+        self._pir_gpio_pin = pir_gpio_pin
+        self._pir_poll_interval_seconds = pir_poll_interval_seconds
+        self._pir_heartbeat_seconds = pir_heartbeat_seconds
+        self._pir_integration = None
+        self._pir_stop_event = None
+        self._pir_ready_event = None
         self._is_running = False
     
     def start_services(self):
@@ -275,6 +291,29 @@ class AuraBot:
                 self.logger.log_mqtt("MQTT integration enabled - sensor data will trigger wellness timers", "INFO")
             except Exception as e:
                 self.logger.log_error(f"MQTT integration failed to start: {e}")
+
+        # Start local PIR GPIO integration if enabled; feeds motion into MQTT sensor API.
+        if self._enable_pir_gpio and self.mqtt_api:
+            try:
+                (
+                    self._pir_integration,
+                    self._pir_stop_event,
+                    self._pir_ready_event,
+                ) = start_pir_integration(
+                    self,
+                    gpio_pin=self._pir_gpio_pin,
+                    poll_interval_seconds=self._pir_poll_interval_seconds,
+                    heartbeat_seconds=self._pir_heartbeat_seconds,
+                )
+                if self._pir_ready_event:
+                    self._pir_ready_event.wait(timeout=3.0)
+            except Exception as e:
+                self.logger.log_error(f"PIR GPIO integration failed to start: {e}")
+        elif self._enable_pir_gpio:
+            self.logger.log_general(
+                "PIR GPIO integration requested but MQTT API is disabled",
+                "WARNING",
+            )
         
         # Start vision (camera) integration if enabled; feeds camera_confirmed into MQTT sensor API
         if self._enable_vision and self.mqtt_api:
@@ -428,6 +467,13 @@ class AuraBot:
                 sleep(0.2)
             except Exception as e:
                 self.logger.log_error(f"Error stopping vision integration: {e}")
+
+        # Stop local PIR integration if enabled
+        if self._pir_integration:
+            try:
+                self._pir_integration.stop()
+            except Exception as e:
+                self.logger.log_error(f"Error stopping PIR integration: {e}")
         
         # Stop wellness timer monitoring
         if self.mqtt_api and self.mqtt_api.wellness_trigger:
@@ -488,6 +534,10 @@ def main():
     Configuration via environment variables:
     - ENABLE_MQTT: Set to "false" to disable MQTT (default: enabled)
     - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
+    - ENABLE_PIR_GPIO: Set to "true" to read PIR sensor from Raspberry Pi GPIO (default: disabled)
+    - PIR_GPIO_PIN: BCM GPIO pin number for local PIR sensor (default: 17)
+    - PIR_POLL_INTERVAL_SECONDS: PIR polling interval (default: 0.2)
+    - PIR_HEARTBEAT_SECONDS: Re-publish PIR state if unchanged after this many seconds (default: 15)
     - VOICE_WS_PORT: Port for the voice WebSocket server (default: 8765)
     - ENABLE_LLM: Set to "false" to disable LLM conversation (default: enabled)
     - LLM_BACKEND: Deprecated alias for primary backend; prefer LLM_PRIMARY_BACKEND
@@ -506,6 +556,10 @@ def main():
     # Check MQTT enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
     enable_vision = os.getenv("ENABLE_VISION", "false").lower() == "true"
+    enable_pir_gpio = os.getenv("ENABLE_PIR_GPIO", "false").lower() == "true"
+    pir_gpio_pin = int(os.getenv("PIR_GPIO_PIN", "17"))
+    pir_poll_interval_seconds = float(os.getenv("PIR_POLL_INTERVAL_SECONDS", "0.2"))
+    pir_heartbeat_seconds = float(os.getenv("PIR_HEARTBEAT_SECONDS", "15"))
     voice_ws_port = int(os.getenv("VOICE_WS_PORT", "8765"))
 
     # LLM configuration
@@ -536,6 +590,10 @@ def main():
     bot = AuraBot(
         enable_mqtt=enable_mqtt,
         enable_vision=enable_vision,
+        enable_pir_gpio=enable_pir_gpio,
+        pir_gpio_pin=pir_gpio_pin,
+        pir_poll_interval_seconds=pir_poll_interval_seconds,
+        pir_heartbeat_seconds=pir_heartbeat_seconds,
         enable_llm=enable_llm,
         llm_backend=llm_primary_backend,
         gemini_api_key=gemini_api_key,
@@ -572,6 +630,16 @@ def main():
     
     if enable_vision:
         bot.logger.log_general("Vision (camera) enabled for presence detection", "INFO")
+    if enable_pir_gpio:
+        bot.logger.log_general(
+            "PIR GPIO enabled for local motion detection",
+            "INFO",
+            metadata={
+                "pin": pir_gpio_pin,
+                "poll_interval_seconds": pir_poll_interval_seconds,
+                "heartbeat_seconds": pir_heartbeat_seconds,
+            },
+        )
 
     # Start dashboard in background thread
     dashboard_port = int(os.getenv("DASHBOARD_PORT", "8000"))

@@ -138,6 +138,16 @@ def _build_status(bot) -> dict:
         and (time.time() - last_camera) <= 60.0
     )
 
+    # PIR: online if local PIR integration enabled and activity received recently.
+    pir_enabled = getattr(bot, "_enable_pir_gpio", False)
+    out["pir_enabled"] = pir_enabled
+    last_pir = getattr(bot, "last_pir_activity", None)
+    out["pir_online"] = (
+        pir_enabled
+        and last_pir is not None
+        and (time.time() - last_pir) <= 60.0
+    )
+
     return out
 
 
