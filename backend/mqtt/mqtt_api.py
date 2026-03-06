@@ -386,6 +386,11 @@ class MQTTAPI:
             if normalized:
                 self._last_esp32_state = normalized
                 self._last_esp32_state_time = self._last_esp32_message_time
+                if self.logger:
+                    self.logger.log_mqtt(
+                        f"Recorded ESP32 state: {normalized}",
+                        "INFO",
+                    )
 
     def get_esp32_last_seen(self) -> Optional[float]:
         """Return Unix timestamp of last ESP32 status (aurabot/status with esp32), or None if never received."""
