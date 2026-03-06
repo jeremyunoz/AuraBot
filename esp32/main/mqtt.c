@@ -11,16 +11,22 @@
 
 #include "system/system_events.h"
 #include "motion/action.h"
+#include "display/robot_eyes.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 
 #if CONFIG_SPEAKER_ENABLE
 #include "audio/tts.h"
 #endif
 
 static const char *TAG = "mqtt";
+static const TickType_t WAVE_HEART_EXPR_MS = pdMS_TO_TICKS(3200);
 
 static esp_mqtt_client_handle_t client = NULL;
 static bool connected = false;
 static QueueHandle_t s_evt_queue = NULL;
+static TimerHandle_t s_wave_expr_timer = NULL;
 
 void mqtt_set_event_queue(QueueHandle_t queue)
 {
@@ -39,6 +45,30 @@ static bool topic_equals(const esp_mqtt_event_handle_t event, const char *topic)
     if (!event || !topic) return false;
     size_t topic_len = strlen(topic);
     return (event->topic_len == (int)topic_len) && (strncmp(event->topic, topic, topic_len) == 0);
+}
+
+static void wave_expr_timer_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    roboeyes_set_state(EYE_STATE_ACTIVE);
+}
+
+static void set_expression_for_user_move(action_id_t id)
+{
+    if (id == ACTION_WAVE) {
+        roboeyes_set_state(EYE_STATE_WAKING);
+        if (s_wave_expr_timer != NULL) {
+            (void)xTimerStop(s_wave_expr_timer, 0);
+            (void)xTimerChangePeriod(s_wave_expr_timer, WAVE_HEART_EXPR_MS, 0);
+            (void)xTimerStart(s_wave_expr_timer, 0);
+        }
+        return;
+    }
+
+    if (s_wave_expr_timer != NULL) {
+        (void)xTimerStop(s_wave_expr_timer, 0);
+    }
+    roboeyes_set_state(EYE_STATE_ACTIVE);
 }
 
 /* Deprecated: TTS-over-MQTT path; voice output now uses Voice WebSocket (Pi sends Opus). */
@@ -119,8 +149,14 @@ static void handle_control_command(const esp_mqtt_event_handle_t event)
         /* User movement: {"cmd":"move","action":"walk"} */
         const cJSON *action = cJSON_GetObjectItemCaseSensitive(root, "action");
         if (cJSON_IsString(action) && action->valuestring) {
+            if (!action_user_control_enabled()) {
+                ESP_LOGW(TAG, "Ignoring move while user control is disabled");
+                cJSON_Delete(root);
+                return;
+            }
             action_id_t id = action_from_string(action->valuestring);
             action_post_user(id);
+            set_expression_for_user_move(id);
         } else {
             ESP_LOGW(TAG, "move cmd missing 'action' string");
         }
@@ -184,6 +220,20 @@ esp_err_t mqtt_start(void)
     if (client) {
         ESP_LOGW(TAG, "MQTT already started");
         return ESP_OK;
+    }
+
+    if (s_wave_expr_timer == NULL) {
+        s_wave_expr_timer = xTimerCreate(
+            "wave_expr",
+            WAVE_HEART_EXPR_MS,
+            pdFALSE,
+            NULL,
+            wave_expr_timer_cb
+        );
+        if (s_wave_expr_timer == NULL) {
+            ESP_LOGE(TAG, "Failed to create wave expression timer");
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     esp_mqtt_client_config_t cfg = {

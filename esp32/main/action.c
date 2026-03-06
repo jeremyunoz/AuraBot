@@ -37,12 +37,12 @@ static QueueHandle_t  s_action_queue        = NULL;
 static volatile bool  s_cancel              = false;
 
 /** Tracks the last completed action (for transition logic in stand()). */
-static action_id_t    s_last_action         = ACTION_STAND;
+static action_id_t    s_last_action         = ACTION_SIT
 
 /** When false, action_post_user() silently drops commands. */
 static bool           s_user_control        = false;
 /** Tracks the most recent action posted to the queue. */
-static volatile action_id_t s_current_cmd   = ACTION_STAND;
+static volatile action_id_t s_current_cmd   = ACTION_SIT;
 
 #define ACTION_TASK_STACK  4096
 #define ACTION_TASK_PRIO   5
@@ -119,9 +119,6 @@ void wave(void)
         FR_angle(60);
         delay_ms(350);
     }
-
-    /* Match teammate flow: force return to standing after wave. */
-    action_post(ACTION_STAND);
 }
 
 /* -------------------------------------------------------------------------- */
