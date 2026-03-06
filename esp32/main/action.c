@@ -73,10 +73,10 @@ void stand(void)
 {
     /* Coming from sit or wave: lift front legs first to avoid scraping */
     if (s_last_action == ACTION_SIT || s_last_action == ACTION_WAVE) {
-        FL_angle(45);
-        FR_angle(45);
-        RL_angle(45);
-        RR_angle(45);
+        FL_angle(0);
+        FR_angle(0);
+        RL_angle(0);
+        RR_angle(0);
         delay_ms(500);
     }
 
@@ -120,7 +120,8 @@ void wave(void)
         delay_ms(350);
     }
 
-    /* Let the state machine drive the next pose (WAKING → ACTIVE → stand). */
+    /* Match teammate flow: force return to standing after wave. */
+    action_post(ACTION_STAND);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -179,13 +180,13 @@ void walk_back(void)
 {
     while (action_should_continue()) {
         /* Phase 1: FL + RR step backward */
-        FL_angle(135);
-        RR_angle(135);
+        FL_angle(125);
+        RR_angle(125);
         delay_ms(250);
         if (!action_should_continue()) break;
 
-        FR_angle(45);
-        RL_angle(45);
+        FR_angle(55);
+        RL_angle(55);
         delay_ms(250);
         if (!action_should_continue()) break;
 
@@ -200,13 +201,13 @@ void walk_back(void)
         if (!action_should_continue()) break;
 
         /* Phase 2: FR + RL step backward */
-        FR_angle(135);
-        RL_angle(135);
+        FR_angle(125);
+        RL_angle(125);
         delay_ms(250);
         if (!action_should_continue()) break;
 
-        FL_angle(45);
-        RR_angle(45);
+        FL_angle(55);
+        RR_angle(55);
         delay_ms(250);
         if (!action_should_continue()) break;
 
