@@ -166,6 +166,14 @@ class MQTTIntegration:
                         metadata={"topic": msg.topic, "status": response.get('status')}
                     )
                 elif msg.topic == "aurabot/status" or msg.topic.startswith("aurabot/status/"):
+                    state = None
+                    if isinstance(data, dict):
+                        state_val = data.get("state")
+                        if isinstance(state_val, str):
+                            state = state_val.strip().upper()
+                        else:
+                            state = None
+                    state_looks_esp32 = state in {"IDLE", "WAKING", "ACTIVE", "SLEEPING"}
                     is_esp32_status = (
                         "esp32" in msg.topic
                         or (isinstance(data, dict) and (
@@ -173,13 +181,9 @@ class MQTTIntegration:
                             or "esp32" in data
                         ))
                         or "esp32" in payload.lower()
+                        or state_looks_esp32
                     )
                     if is_esp32_status:
-                        state = None
-                        if isinstance(data, dict):
-                            state_val = data.get("state")
-                            if isinstance(state_val, str):
-                                state = state_val
                         self.mqtt_api.record_esp32_message_received(state=state)
                 elif msg.topic == "aurabot/tts/speak":
                     # Deprecated: TTS-over-MQTT path; backend used to publish here for ESP32 (no action)

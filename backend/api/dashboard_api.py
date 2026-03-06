@@ -121,7 +121,7 @@ def _build_status(bot) -> dict:
     # ESP32: online if we received aurabot/status with esp32 recently (within 60s)
     if bot.mqtt_api:
         out["esp32_online"] = bot.mqtt_api.is_esp32_online(within_seconds=60.0)
-        out["esp32_state"] = bot.mqtt_api.get_esp32_state(within_seconds=120.0)
+        out["esp32_state"] = bot.mqtt_api.get_esp32_state()
         out["esp32_user_control_enabled"] = bot.mqtt_api.is_esp32_user_control_enabled()
     else:
         out["esp32_online"] = False

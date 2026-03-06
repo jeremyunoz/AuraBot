@@ -398,13 +398,17 @@ class MQTTAPI:
             return False
         return (time.time() - t) <= within_seconds
 
-    def get_esp32_state(self, within_seconds: float = 120.0) -> Optional[str]:
+    def get_esp32_state(self, within_seconds: Optional[float] = None) -> Optional[str]:
         """
-        Return last known ESP32 state if fresh enough, otherwise None.
+        Return last known ESP32 state.
+
+        Args:
+            within_seconds: Optional freshness window. When None, return the most
+            recent known state regardless of age.
         """
         if self._last_esp32_state_time is None or self._last_esp32_state is None:
             return None
-        if (time.time() - self._last_esp32_state_time) > within_seconds:
+        if within_seconds is not None and (time.time() - self._last_esp32_state_time) > within_seconds:
             return None
         return self._last_esp32_state
 
