@@ -37,10 +37,12 @@ typedef enum {
 
 #define STATE_TASK_STACK_SIZE    4096
 #define USONIC_TASK_STACK_SIZE   3072
+#define STATUS_TASK_STACK_SIZE   2048
 #define EVT_QUEUE_LEN            10
+#define STATUS_PUBLISH_PERIOD_MS 30000
 
 static QueueHandle_t s_evt_queue = NULL;
-static sys_state_t s_state = SYS_STATE_IDLE;
+static volatile sys_state_t s_state = SYS_STATE_IDLE;
 static TickType_t  s_active_since = 0;
 #define MIN_ACTIVE_FOR_SLEEP_MS  5000
 
@@ -80,7 +82,7 @@ static roboeyes_state_t sys_to_eye_state(sys_state_t s)
 static action_id_t sys_to_action(sys_state_t s)
 {
     switch (s) {
-    case SYS_STATE_IDLE:     return ACTION_STAND;
+    case SYS_STATE_IDLE:     return ACTION_SIT;
     case SYS_STATE_WAKING:   return ACTION_WAVE;
     case SYS_STATE_ACTIVE:   return ACTION_STAND;
     case SYS_STATE_SLEEPING: return ACTION_LAY_DOWN;
@@ -237,6 +239,15 @@ static void state_task(void *arg)
     }
 }
 
+static void status_publish_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(STATUS_PUBLISH_PERIOD_MS));
+        publish_state((sys_state_t)s_state);
+    }
+}
+
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -263,6 +274,7 @@ void app_main(void)
 
     /* ---- Servo / action subsystem ---- */
     action_task_start();
+    action_post(ACTION_SIT);
 
     /* Initialize speaker (also sets up I2S RX for mic input) */
 #if CONFIG_SPEAKER_ENABLE
@@ -301,6 +313,7 @@ void app_main(void)
     set_state(SYS_STATE_IDLE);
 
     xTaskCreate(state_task, "state_task", STATE_TASK_STACK_SIZE, NULL, 6, NULL);
+    xTaskCreate(status_publish_task, "status_task", STATUS_TASK_STACK_SIZE, NULL, 4, NULL);
     xTaskCreate(usonic_task, "usonic_task", USONIC_TASK_STACK_SIZE, NULL, 5, NULL);
 
     while (1) {
