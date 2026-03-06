@@ -121,8 +121,12 @@ def _build_status(bot) -> dict:
     # ESP32: online if we received aurabot/status with esp32 recently (within 60s)
     if bot.mqtt_api:
         out["esp32_online"] = bot.mqtt_api.is_esp32_online(within_seconds=60.0)
+        out["esp32_state"] = bot.mqtt_api.get_esp32_state(within_seconds=120.0)
+        out["esp32_user_control_enabled"] = bot.mqtt_api.is_esp32_user_control_enabled()
     else:
         out["esp32_online"] = False
+        out["esp32_state"] = None
+        out["esp32_user_control_enabled"] = False
 
     # Camera: online if vision enabled and frames received recently (within 60s)
     camera_enabled = getattr(bot, "_enable_vision", False)
@@ -163,6 +167,28 @@ def create_app(aurabot: Optional[Any] = None) -> FastAPI:
     def api_control(request: Request, body: ControlBody):
         bot = _get_aurabot(request)
         data = {"cmd": body.cmd, **(body.params or {})}
+        if body.cmd == "move":
+            action = (body.params or {}).get("action")
+            if not isinstance(action, str) or not action.strip():
+                return {"status": "error", "error": "Missing movement action"}
+            allowed_actions = {
+                "stand", "walk", "back", "lay_down",
+                "turn_left", "turn_right", "sit", "wave", "swing",
+            }
+            normalized_action = action.strip().lower()
+            if normalized_action not in allowed_actions:
+                return {"status": "error", "error": f"Unsupported movement action: {action}"}
+            if not bot.mqtt_integration or not bot.mqtt_integration.is_connected():
+                return {"status": "error", "error": "MQTT is not connected"}
+            if not bot.mqtt_integration.publish(
+                "aurabot/control",
+                {"cmd": "move", "action": normalized_action},
+                qos=1,
+                retain=False,
+            ):
+                return {"status": "error", "error": "Failed to publish movement command"}
+            return {"status": "success", "command": "move", "action": normalized_action}
+
         if bot.mqtt_api:
             result = bot.mqtt_api.handle_control_command(data)
         else:

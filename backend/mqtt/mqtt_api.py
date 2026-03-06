@@ -88,6 +88,9 @@ class MQTTAPI:
         self._last_sensor_time: Optional[float] = None
         # Last time we received aurabot/status with esp32 in topic or payload (dashboard ESP32 status only)
         self._last_esp32_message_time: Optional[float] = None
+        # Last reported ESP32 state from aurabot/status payload (e.g. ACTIVE/IDLE)
+        self._last_esp32_state: Optional[str] = None
+        self._last_esp32_state_time: Optional[float] = None
         # Last TTS ack from ESP32 (aurabot/tts/ack)
         self._last_tts_ack: Optional[Dict] = None
         self._last_tts_ack_time: Optional[float] = None
@@ -370,9 +373,19 @@ class MQTTAPI:
         
         return response
     
-    def record_esp32_message_received(self) -> None:
-        """Record that we received an ESP32 status message (aurabot/status with esp32). Call from MQTT integration only."""
+    def record_esp32_message_received(self, state: Optional[str] = None) -> None:
+        """
+        Record that we received an ESP32 status message (aurabot/status with esp32).
+
+        Args:
+            state: Optional ESP32 state from payload (e.g. ACTIVE/IDLE/WAKING/SLEEPING).
+        """
         self._last_esp32_message_time = time.time()
+        if state:
+            normalized = str(state).strip().upper()
+            if normalized:
+                self._last_esp32_state = normalized
+                self._last_esp32_state_time = self._last_esp32_message_time
 
     def get_esp32_last_seen(self) -> Optional[float]:
         """Return Unix timestamp of last ESP32 status (aurabot/status with esp32), or None if never received."""
@@ -384,6 +397,22 @@ class MQTTAPI:
         if t is None:
             return False
         return (time.time() - t) <= within_seconds
+
+    def get_esp32_state(self, within_seconds: float = 120.0) -> Optional[str]:
+        """
+        Return last known ESP32 state if fresh enough, otherwise None.
+        """
+        if self._last_esp32_state_time is None or self._last_esp32_state is None:
+            return None
+        if (time.time() - self._last_esp32_state_time) > within_seconds:
+            return None
+        return self._last_esp32_state
+
+    def is_esp32_user_control_enabled(self) -> bool:
+        """
+        User movement commands are enabled on ESP32 only while state is ACTIVE.
+        """
+        return self.is_esp32_online() and self.get_esp32_state() == "ACTIVE"
     
     def _start_timeout_monitoring(self):
         """Start background thread to monitor sensor data timeout and auto-pause."""
@@ -725,4 +754,3 @@ class MQTTAPI:
             "presence_stable_count": self._presence_stable_count,
             "absence_stable_count": self._absence_stable_count
         }
-
