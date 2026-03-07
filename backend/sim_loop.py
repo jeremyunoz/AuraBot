@@ -325,10 +325,10 @@ class AuraBot:
         # Start vision (camera) integration if enabled; feeds camera_confirmed into local sensor API
         if self._enable_vision and self.mqtt_api:
             try:
-                self.mqtt_api.set_presence_fusion(True)  # Require camera AND PIR to infer presence
+                self.mqtt_api.set_camera_dominant_presence(True)  # Camera drives presence; PIR fallback when camera stale + periodic sanity check
                 self._vision_stop_event, self._vision_ready_event = start_vision_integration(self)
                 self.logger.log_general(
-                    "Vision integration enabled - presence requires both camera and PIR motion",
+                    "Vision integration enabled - presence driven by camera, PIR as fallback when camera unavailable",
                     "INFO",
                 )
                 # Wait for vision model to load, camera to initialize, and warmup to complete

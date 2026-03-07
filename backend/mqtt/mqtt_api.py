@@ -68,6 +68,13 @@ class MQTTAPI:
         self._motion_threshold = 1.0  # Minimum motion value to consider active
         # When True (vision enabled), presence requires BOTH camera AND PIR motion
         self._require_pir_with_camera = False
+        # Camera-dominant mode: camera drives presence when valid; PIR only when camera stale
+        self._camera_dominant_presence = False
+        # Periodic PIR complement: run sanity check every N seconds
+        self._pir_complement_interval_seconds = 30.0
+        self._pir_absence_threshold_seconds = 60.0
+        self._last_pir_complement_check_time: Optional[float] = None
+        self._last_pir_motion_time: Optional[float] = None  # When PIR last saw motion (for sanity check)
         # Last PIR/ESP32 state (so vision-only updates don't overwrite it)
         self._last_esp32_motion: Optional[int] = None
         self._last_esp32_time: Optional[float] = None
@@ -232,13 +239,34 @@ class MQTTAPI:
         # 1. Calculate presence
         pir_present = effective_motion >= self._motion_threshold
         cam_present = effective_camera_confirmed == 1
-        if self._require_pir_with_camera:
+        # Track last PIR motion time for periodic sanity check (camera-dominant mode)
+        if pir_present:
+            self._last_pir_motion_time = now
+
+        presence_driven_by: Optional[str] = None
+        if self._camera_dominant_presence:
+            if cam_valid:
+                is_present = cam_present
+                presence_driven_by = "camera"
+            else:
+                is_present = pir_present
+                presence_driven_by = "pir"
+            # Periodic PIR sanity check: if camera says present but PIR has had no motion for M seconds, override to absent
+            if self._camera_dominant_presence and cam_valid and cam_present:
+                if self._last_pir_complement_check_time is None or (now - self._last_pir_complement_check_time) >= self._pir_complement_interval_seconds:
+                    self._last_pir_complement_check_time = now
+                    pir_motion_seconds_ago = (now - self._last_pir_motion_time) if self._last_pir_motion_time is not None else float("inf")
+                    if pir_motion_seconds_ago > self._pir_absence_threshold_seconds:
+                        is_present = False
+        elif self._require_pir_with_camera:
             # Fusion mode: require BOTH camera AND PIR motion.
             is_present = cam_present and pir_present
         else:
             # Non-fusion mode: either source can indicate presence.
             is_present = cam_present or pir_present
-        
+
+        pir_confirms = bool(cam_present and pir_present)
+
         # Check if wellness timer is active - if so, don't resume session timer
         # User should complete the break before session resumes
         active_wellness_timers = self.timer_manager.get_active_timers(
@@ -258,9 +286,11 @@ class MQTTAPI:
             "effective_camera_confirmed": effective_camera_confirmed,
             "presence": is_present,
             "presence_fusion": self._require_pir_with_camera,
+            "camera_dominant_presence": self._camera_dominant_presence,
             "effective_motion": effective_motion,
             "pir_present": pir_present,
             "camera_present": cam_present,
+            "pir_confirms": pir_confirms,
             "sources": {
                 "from_esp32": from_esp32,
                 "from_camera": from_camera,
@@ -268,6 +298,7 @@ class MQTTAPI:
                 "esp32_state_valid": esp32_valid,
                 "camera_state_valid": cam_valid,
             },
+            "presence_driven_by": presence_driven_by,
             "wellness_timer_active": wellness_timer_active,
             "debounce": {
                 "consecutive_present": self._consecutive_present_count,
@@ -729,7 +760,26 @@ class MQTTAPI:
     def get_presence_fusion(self) -> bool:
         """Return True if presence fusion (camera + PIR) is enabled."""
         return self._require_pir_with_camera
-    
+
+    def set_camera_dominant_presence(self, enabled: bool) -> None:
+        """
+        Set camera-dominant presence mode.
+        When True, camera drives presence when valid; PIR is fallback when camera stale,
+        plus periodic PIR sanity check can override to absent.
+        """
+        self._camera_dominant_presence = enabled
+
+    def get_camera_dominant_presence(self) -> bool:
+        """Return True if camera-dominant presence mode is enabled."""
+        return self._camera_dominant_presence
+
+    def get_pir_complement_config(self) -> dict:
+        """Return PIR complement (sanity check) configuration."""
+        return {
+            "pir_complement_interval_seconds": self._pir_complement_interval_seconds,
+            "pir_absence_threshold_seconds": self._pir_absence_threshold_seconds,
+        }
+
     def update_debounce_config(self, 
                                 presence_stable_count: Optional[int] = None,
                                 absence_stable_count: Optional[int] = None):
