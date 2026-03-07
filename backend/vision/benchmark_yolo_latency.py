@@ -12,15 +12,28 @@ import statistics
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
-from backend.vision.object_detection import (
-    DEFAULT_FRAME_SIZE,
-    _capture_args_from_dict,
-    _load_yolo_model,
-    _open_capture,
-)
+try:
+    from backend.vision.object_detection import (
+        DEFAULT_FRAME_SIZE,
+        _capture_args_from_dict,
+        _load_yolo_model,
+        _open_capture,
+    )
+except ModuleNotFoundError:
+    # Allow running this file directly via `python backend/vision/benchmark_yolo_latency.py`.
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from backend.vision.object_detection import (
+        DEFAULT_FRAME_SIZE,
+        _capture_args_from_dict,
+        _load_yolo_model,
+        _open_capture,
+    )
 
 # Directory for backend vision assets.
 _VISION_DIR = os.path.dirname(os.path.abspath(__file__))
