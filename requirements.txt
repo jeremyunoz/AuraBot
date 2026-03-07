@@ -29,5 +29,6 @@ portalocker>=3.0.0
 # Vision – Raspberry Pi (optional)
 # On Pi 5: sudo apt install python3-picamera2 (preferred). Or install via pip:
 # picamera2>=0.3.0
-# Sony IMX AI camera (RPi application module):
-# modlib @ git+https://github.com/SonySemiconductorSolutions/aitrios-rpi-application-module-library.git
+# Vision – Raspberry Pi AI Camera (Sony IMX500, on-sensor inference; optional)
+# Requires on device: sudo apt install imx500-all && sudo reboot
+# pip install git+https://github.com/SonySemiconductorSolutions/aitrios-rpi-application-module-library.git

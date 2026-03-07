@@ -18,9 +18,9 @@ A voice-activated wellness chatbot that uses speech-to-text and text-to-speech f
 
 ### Hardware & Integration
 -  📡 **ESP32 + MQTT (optional transport)**: PIR motion sensor publishes to `aurabot/sensors`
--  📷 **Vision Module**: YOLO person detection on Raspberry Pi 5 (camera_confirmed)
+-  📷 **Vision Module**: Auto-selects IMX500 AI Camera on-sensor inference when available, otherwise Pi camera / OpenCV YOLO
 -  📊 **Web Dashboard**: Status, session controls, timers, wellness config (port 8000)
--  🧪 **Presence Simulator**: `presence_sim.sh` for testing without hardware
+-  🧪 **Helper Scripts**: `scripts/presence_sim.sh`, `scripts/run_backend_imx.sh`, `scripts/temp_check.sh`
 
 ## Requirements
 
@@ -81,13 +81,13 @@ python sim_loop.py
 
 ```bash
 # Simulate user present (starts session)
-./presence_sim.sh
+./scripts/presence_sim.sh
 
 # Simulate user absent (pauses session)
-DISTANCE_CM=60 MOTION=0 CAMERA_CONFIRMED=0 ./presence_sim.sh
+DISTANCE_CM=60 MOTION=0 CAMERA_CONFIRMED=0 ./scripts/presence_sim.sh
 ```
 
-If your broker requires auth: `MQTT_USER=user MQTT_PASS=pass ./presence_sim.sh`
+If your broker requires auth: `MQTT_USER=user MQTT_PASS=pass ./scripts/presence_sim.sh`
 
 ### Local PIR + camera on server (no MQTT broker required)
 
@@ -108,8 +108,28 @@ Notes:
 ```bash
 cd backend/vision
 python setup_model.py   # First time only
-python object_detection.py --capture picamera2
+python check_cameras.py
+python object_detection.py --capture auto
 ```
+
+`--capture auto` prefers the Raspberry Pi AI Camera (`imx`) when the exported IMX model and runtime stack are available; otherwise it falls back to `picamera2`, then OpenCV.
+
+### Run AuraBot with IMX AI Camera
+
+Use the helper launcher so `LD_LIBRARY_PATH` and `MODLIB_LIBCAMERA` are set before Python starts:
+
+```bash
+ENABLE_VISION=true ./scripts/run_backend_imx.sh
+```
+
+Optional vision tuning in `backend/.env`:
+- `VISION_CAPTURE=auto|imx|picamera2|opencv`
+- `VISION_IMX_MODEL_DIR=yolo11n_imx_model`
+- `VISION_MODEL=yolo26n_ncnn_model`
+- `VISION_FALLBACK_MODEL=yolo26n.pt`
+- `VISION_WARMUP_FRAMES=10`
+- `VISION_READ_RETRIES=50`
+- `VISION_REPORT_INTERVAL_FRAMES=15`
 
 ### ESP32 firmware
 
@@ -238,8 +258,15 @@ AuraBot/
 │   │   └── dashboard_api.py     # FastAPI dashboard (status, sessions, control)
 │   └── vision/                  # Camera presence and YOLO utilities
 │       ├── vision_integration.py # Person detection → server-side sensor API
-│       ├── object_detection.py  # YOLO person detection runtime
-│       └── setup_model.py       # Model download and NCNN conversion
+│       ├── object_detection.py  # IMX500 / Pi camera / OpenCV detection runtime
+│       ├── check_cameras.py     # Reports detected cameras and AuraBot default
+│       ├── setup_model.py       # Model download and NCNN conversion
+│       └── setup_imx_model.py   # YOLO export to Sony IMX500 format
+├── scripts/
+│   ├── presence_sim.sh          # MQTT presence test loop
+│   ├── run_backend_imx.sh       # Launch backend with IMX libcamera env
+│   ├── setup_pi_venv.sh         # Pi helper for isolated export venv
+│   └── temp_check.sh            # Raspberry Pi temperature loop
 ├── dashboard/
 │   ├── index.html               # Web dashboard UI
 │   ├── app.js                   # Dashboard logic
@@ -252,7 +279,6 @@ AuraBot/
 │       ├── pir.c/h              # PIR motion sensor (GPIO)
 │       ├── speaker.c/h          # Speaker (ES8311 via esp_codec_dev)
 │       └── wifi_connect.c/h     # WiFi STA
-├── presence_sim.sh              # MQTT presence test script
 ├── RASPBERRY_PI_SETUP.md        # Pi 5 audio and environment setup
 ├── requirements.txt
 └── README.md
@@ -352,7 +378,9 @@ PIR_WARMUP_SECONDS=30
 - `paho-mqtt` – MQTT client
 - `python-dotenv` – env config
 - `fastapi`, `uvicorn` – dashboard API
-- `ultralytics`, `opencv-python-headless` – vision (Raspberry Pi)
+- `ultralytics`, `opencv-python-headless` – CPU vision paths
+- `ncnn`, `portalocker` – NCNN runtime support
+- IMX500 runtime: `sudo apt install imx500-all` and install Sony Aitrios modlib on the Pi
 
 ## Platform Support
 
@@ -396,3 +424,4 @@ PIR_WARMUP_SECONDS=30
 
 - **[RASPBERRY_PI_SETUP.md](RASPBERRY_PI_SETUP.md)** – Pi 5 audio capture, dependencies, MQTT auth
 - **[backend/vision/README.md](backend/vision/README.md)** – YOLO setup and object detection on Pi 5
+- **[backend/vision/IMX_PI_AI_CAMERA_SETUP.md](backend/vision/IMX_PI_AI_CAMERA_SETUP.md)** – Sony IMX500 export and Raspberry Pi AI Camera runtime notes

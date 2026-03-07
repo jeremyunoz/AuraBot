@@ -36,6 +36,16 @@ import traceback
 # Load environment variables
 load_dotenv()
 
+# When vision uses IMX (MODLIB_LIBCAMERA=LOCAL), ensure child processes see libcamera from /usr/local (v0.7+).
+# For the current process to use IMX, set LD_LIBRARY_PATH before starting Python (e.g. scripts/run_backend_imx.sh).
+if os.environ.get("MODLIB_LIBCAMERA", "").upper() == "LOCAL":
+    _local_lib = "/usr/local/lib/aarch64-linux-gnu"
+    if os.path.isdir(_local_lib):
+        _prev = os.environ.get("LD_LIBRARY_PATH", "")
+        if _prev and not _prev.startswith(_local_lib):
+            os.environ["LD_LIBRARY_PATH"] = f"{_local_lib}:{_prev}"
+        elif not _prev:
+            os.environ["LD_LIBRARY_PATH"] = _local_lib
 
 # Configuration
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,6 +83,7 @@ class AuraBot:
         llm_fallback_backend: Optional[str] = None,
         llm_disable_fallback: bool = False,
         local_llm_warm_on_start: bool = False,
+        vision_config: Optional[dict] = None,
     ):
         """
         Initialize the AuraBot chatbot.
@@ -107,6 +118,8 @@ class AuraBot:
             llm_disable_fallback: When True, always use a single backend (no hybrid routing).
             local_llm_warm_on_start: When True and a local Ollama backend is configured, send a
                                      tiny warm-up request on startup to reduce first-response latency.
+            vision_config: Optional dict for vision integration (capture_config, model_name, fallback_model,
+                           warmup_frames, read_retries, report_interval_frames). Aligned with backend/vision/object_detection.
         """
         self.greeting = greeting
         # Use AuraBotLogger for comprehensive logging with category routing
@@ -273,6 +286,7 @@ class AuraBot:
             self.logger.log_general("Continuing without sensor/session automation support...", "WARNING")
         
         self._enable_vision = enable_vision
+        self._vision_config = vision_config or {}
         self._vision_stop_event = None
         self._vision_ready_event = None
         self._enable_pir_gpio = enable_pir_gpio
@@ -326,7 +340,7 @@ class AuraBot:
         if self._enable_vision and self.mqtt_api:
             try:
                 self.mqtt_api.set_camera_dominant_presence(True)  # Camera drives presence; PIR fallback when camera stale + periodic sanity check
-                self._vision_stop_event, self._vision_ready_event = start_vision_integration(self)
+                self._vision_stop_event, self._vision_ready_event = start_vision_integration(self, **self._vision_config)
                 self.logger.log_general(
                     "Vision integration enabled - presence driven by camera, PIR as fallback when camera unavailable",
                     "INFO",
@@ -560,10 +574,38 @@ def main():
     - WELLNESS_THRESHOLD_SECONDS: Sitting time threshold before wellness timer triggers
     - WELLNESS_BREAK_DURATION_SECONDS: Duration of wellness break timer
     - WELLNESS_PAUSE_TIMEOUT_SECONDS: Seconds to wait while paused before stopping session
+    - VISION_CAPTURE: When ENABLE_VISION=true, set to "auto"|"imx"|"picamera2"|"opencv" (default: auto)
+    - VISION_IMX_MODEL_DIR: IMX model dir under backend/vision when using AI Camera (default: yolo11n_imx_model)
+    - For IMX AI camera: set MODLIB_LIBCAMERA=LOCAL and LD_LIBRARY_PATH=/usr/local/lib/aarch64-linux-gnu
+      before starting (e.g. scripts/run_backend_imx.sh), so the process uses libcamera v0.6+ from /usr/local.
+    - VISION_MODEL: YOLO model name for CPU path (default: yolo26n_ncnn_model)
+    - VISION_FALLBACK_MODEL: Fallback YOLO model (default: yolo26n.pt)
+    - VISION_WARMUP_FRAMES: Frames to discard at startup (default: 10)
+    - VISION_READ_RETRIES: Consecutive read failures before exit (default: 50)
+    - VISION_REPORT_INTERVAL_FRAMES: Heartbeat interval in frames (default: 15)
     """
     # Check MQTT transport enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
     enable_vision = os.getenv("ENABLE_VISION", "false").lower() == "true"
+    # Vision pipeline config (aligned with backend/vision/object_detection)
+    vision_config = {}
+    if enable_vision:
+        vision_capture = os.getenv("VISION_CAPTURE", "").strip().lower()
+        vision_imx_dir = os.getenv("VISION_IMX_MODEL_DIR", "").strip()
+        if vision_capture in ("auto", "imx", "picamera2", "opencv"):
+            vision_config.setdefault("capture_config", {})["capture"] = vision_capture
+        if vision_imx_dir:
+            vision_config.setdefault("capture_config", {})["imx_model_dir"] = vision_imx_dir
+        for key, env_key, cast in [
+            ("model_name", "VISION_MODEL", str),
+            ("fallback_model", "VISION_FALLBACK_MODEL", str),
+            ("warmup_frames", "VISION_WARMUP_FRAMES", int),
+            ("read_retries", "VISION_READ_RETRIES", int),
+            ("report_interval_frames", "VISION_REPORT_INTERVAL_FRAMES", int),
+        ]:
+            val = os.getenv(env_key, "").strip()
+            if val:
+                vision_config[key] = cast(val) if cast is int else val
     enable_pir_gpio = os.getenv("ENABLE_PIR_GPIO", "false").lower() == "true"
     pir_gpio_pin = int(os.getenv("PIR_GPIO_PIN", "17"))
     pir_poll_interval_seconds = float(os.getenv("PIR_POLL_INTERVAL_SECONDS", "0.2"))
@@ -599,6 +641,7 @@ def main():
     bot = AuraBot(
         enable_mqtt=enable_mqtt,
         enable_vision=enable_vision,
+        vision_config=vision_config if enable_vision else None,
         enable_pir_gpio=enable_pir_gpio,
         pir_gpio_pin=pir_gpio_pin,
         pir_poll_interval_seconds=pir_poll_interval_seconds,

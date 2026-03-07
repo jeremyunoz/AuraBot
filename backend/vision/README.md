@@ -31,7 +31,18 @@ This creates `yolo26n_ncnn_model/`.
 From project root:
 
 ```bash
-python backend/vision/object_detection.py
+python backend/vision/check_cameras.py
+python backend/vision/object_detection.py --capture auto
+```
+
+`--capture auto` prefers the Raspberry Pi AI Camera (`imx`) when available, then `picamera2`, then OpenCV.
+
+Useful overrides:
+
+```bash
+python backend/vision/object_detection.py --capture picamera2
+python backend/vision/object_detection.py --capture opencv --device /dev/video0
+python backend/vision/object_detection.py --capture imx --imx-model-dir yolo11n_imx_model
 ```
 
 ## Workflow B: IMX export for Raspberry Pi AI Camera
@@ -47,6 +58,28 @@ python backend/vision/setup_imx_model.py --model yolo11n.pt --imgsz 640
 ```
 
 Detailed setup/deploy notes: `backend/vision/IMX_PI_AI_CAMERA_SETUP.md`.
+
+## Workflow C: Run AuraBot with vision enabled
+
+From project root:
+
+```bash
+ENABLE_VISION=true ./scripts/run_backend_imx.sh
+```
+
+This launcher sets `MODLIB_LIBCAMERA=LOCAL` and prepends `/usr/local/lib/aarch64-linux-gnu` to `LD_LIBRARY_PATH` before Python starts, which is required on Pi systems where the IMX runtime must use the newer libcamera build.
+
+Relevant environment variables:
+
+```bash
+VISION_CAPTURE=auto|imx|picamera2|opencv
+VISION_IMX_MODEL_DIR=yolo11n_imx_model
+VISION_MODEL=yolo26n_ncnn_model
+VISION_FALLBACK_MODEL=yolo26n.pt
+VISION_WARMUP_FRAMES=10
+VISION_READ_RETRIES=50
+VISION_REPORT_INTERVAL_FRAMES=15
+```
 
 ## Benchmark (NCNN runtime path)
 

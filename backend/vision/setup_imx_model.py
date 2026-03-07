@@ -30,9 +30,11 @@ def main() -> None:
 
     model = YOLO(args.model)
 
+    # data is required for PTQ quantization (object detection: coco8.yaml per Ultralytics IMX500 docs)
     export_kwargs = {
         "format": "imx",
         "imgsz": args.imgsz,
+        "data": "coco8.yaml",
     }
     if args.half:
         export_kwargs["half"] = True

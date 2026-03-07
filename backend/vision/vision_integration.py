@@ -31,25 +31,50 @@ def _resolve_vision_paths(backend_dir: str, model_name: str, fallback_model: str
 
 
 def _build_capture_config(capture_config: Optional[dict]) -> dict:
-    """Build capture config; default to picamera2 when importable (Pi 5)."""
+    """Build capture config aligned with object_detection: prefer IMX when available, else picamera2 (Pi 5), else auto.
+    Supports same keys as object_detection._capture_args_from_dict: capture, imx_model_dir, camera, device, width, height, fps, v4l2."""
     effective = dict(capture_config or {})
+    try:
+        from backend.vision.object_detection import DEFAULT_IMX_MODEL_DIR, _get_vision_dir, _imx_available, _picamera2_importable
+    except ImportError:
+        effective.setdefault("capture", "auto")
+        return effective
+    vision_dir = _get_vision_dir()
+    imx_model_dir = effective.get("imx_model_dir", DEFAULT_IMX_MODEL_DIR)
     if "capture" not in effective:
-        try:
-            from backend.vision.object_detection import _picamera2_importable
+        if _imx_available(vision_dir, imx_model_dir):
+            effective["capture"] = "imx"
+        else:
             effective["capture"] = "picamera2" if _picamera2_importable() else "auto"
-        except ImportError:
-            effective["capture"] = "auto"
     return effective
 
 
-def _log_available_cameras(aurabot: Any) -> None:
-    """Log which cameras are available (picamera2 / opencv)."""
+def _log_available_cameras(aurabot: Any, capture_config: Optional[dict] = None) -> None:
+    """Log which cameras are available without poisoning IMX libcamera imports."""
     logger = getattr(aurabot, "logger", None)
     if not logger:
         return
     try:
-        from backend.vision.object_detection import list_available_cameras
-        cameras = list_available_cameras()
+        from backend.vision.object_detection import (
+            DEFAULT_IMX_MODEL_DIR,
+            _get_vision_dir,
+            _imx_available,
+            list_available_cameras,
+        )
+        effective_capture = dict(capture_config or {})
+        requested_capture = effective_capture.get("capture", "auto")
+        imx_model_dir = effective_capture.get("imx_model_dir", DEFAULT_IMX_MODEL_DIR)
+        vision_dir = _get_vision_dir()
+
+        # Avoid importing picamera2 before IMX startup. A failed picamera2 import can leave
+        # the system libcamera extension (/usr/lib, v0.5.x) loaded in-process, which then
+        # causes modlib's later IMX libcamera check to report the wrong version.
+        if requested_capture == "imx" or (
+            requested_capture == "auto" and _imx_available(vision_dir, imx_model_dir)
+        ):
+            cameras = [{"backend": "imx", "id": "ai_camera", "ok": True}]
+        else:
+            cameras = list_available_cameras()
         available = [c for c in cameras if c.get("ok")]
         if available:
             cam_str = ", ".join(f"{c['backend']}:{c['id']}" for c in available)
@@ -68,7 +93,16 @@ def _send_presence_to_sensor_api(aurabot: Any, person_info: dict) -> None:
     """Send camera_confirmed (presence) to server-side sensor API."""
     if "error" in person_info:
         if getattr(aurabot, "logger", None):
-            aurabot.logger.log_general(f"Vision error: {person_info['error']}", "WARNING")
+            err = person_info["error"]
+            # Known env limitation: libcamera too old for IMX; PIR fallback is expected
+            if "libcamera" in err and "v0.6" in err:
+                aurabot.logger.log_general(
+                    "IMX camera unavailable (libcamera upgrade required). Using PIR fallback. See backend/vision/IMX_PI_AI_CAMERA_SETUP.md. "
+                    "To use the AI camera, start the backend with LD_LIBRARY_PATH set before Python (e.g. scripts/run_backend_imx.sh).",
+                    "INFO",
+                )
+            else:
+                aurabot.logger.log_general(f"Vision error: {err}", "WARNING")
         person_info = {"detected": False, "count": 0, "boxes": []}
     camera_confirmed = 1 if person_info.get("detected") else 0
     try:
@@ -125,8 +159,8 @@ def start_vision_integration(
             if getattr(aurabot, "logger", None):
                 aurabot.logger.log_error(f"Vision module not available: {e}")
             return
-        _log_available_cameras(aurabot)
         effective_capture = _build_capture_config(capture_config)
+        _log_available_cameras(aurabot, effective_capture)
         run_detection_loop(
             on_detection,
             stop_event,

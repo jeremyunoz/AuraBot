@@ -1,16 +1,28 @@
 """
 Real-time person detection using YOLO.
-Supports Picamera2 (Pi 5 libcamera) and OpenCV V4L2. Used standalone or via run_detection_loop() for AuraBot.
+Supports:
+  - Raspberry Pi AI Camera (Sony IMX500): on-sensor inference via aitrios modlib (preferred when available).
+  - Picamera2 (Pi 5 libcamera) + CPU YOLO.
+  - OpenCV V4L2 + CPU YOLO.
+Used standalone or via run_detection_loop() for AuraBot.
 """
-from ultralytics import YOLO
-import cv2
+from __future__ import annotations
+
 import argparse
+import glob
 import os
 import time
 import threading
-import glob
 from pathlib import Path
 from typing import Callable, Optional
+
+import cv2
+
+# YOLO (ultralytics) used only for CPU/NCNN inference path; IMX path uses on-sensor model
+try:
+    from ultralytics import YOLO
+except ImportError:
+    YOLO = None  # type: ignore[misc, assignment]
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -18,11 +30,92 @@ from typing import Callable, Optional
 DEFAULT_FRAME_SIZE = (640, 480)
 OPENCV_PROBE_TIMEOUT_MS = 500
 PERSON_CLASS_NAME = "person"
+# IMX500 (Raspberry Pi AI Camera): default model dir name under backend/vision
+DEFAULT_IMX_MODEL_DIR = "yolo11n_imx_model"
+IMX_PACKER_ZIP = "packerOut.zip"
+IMX_LABELS_FILE = "labels.txt"
+# Frame rate for AI Camera: keep close to on-sensor DPS to avoid request/detection mismatch (modlib warns if RPS >> DPS).
+IMX_OBJECT_DETECTION_FPS = 10
+# Minimum confidence for person detections from IMX
+IMX_PERSON_CONFIDENCE_THRESHOLD = 0.55
+
+# Prefer libcamera from /usr/local (v0.7+) when present so modlib uses it instead of apt's v0.5.
+# modlib loads /usr/lib's Python libcamera by default, which reports v0.5 and fails the v0.6 check.
+if os.environ.get("MODLIB_LIBCAMERA", "").upper() != "LOCAL":
+    os.environ["MODLIB_LIBCAMERA"] = "LOCAL"
+    _local_lib = "/usr/local/lib/aarch64-linux-gnu"
+    if os.path.isdir(_local_lib):
+        _prev = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = f"{_local_lib}:{_prev}" if _prev else _local_lib
 
 
 def _empty_person_info():
     """Standard empty detection result."""
     return {"detected": False, "count": 0, "boxes": []}
+
+
+def _get_vision_dir() -> Path:
+    """Return backend/vision directory (where IMX model dirs and this script live)."""
+    return Path(__file__).resolve().parent
+
+
+def _imx_available(vision_dir: Optional[Path] = None, model_dir_name: str = DEFAULT_IMX_MODEL_DIR) -> bool:
+    """
+    Return True if Raspberry Pi AI Camera (IMX500) stack is available and model is present.
+    Requires: imx500-all (apt), aitrios-rpi-application-module-library (pip), and packerOut.zip + labels.txt.
+    """
+    vision_dir = vision_dir or _get_vision_dir()
+    model_dir = vision_dir / model_dir_name
+    if not (model_dir / IMX_PACKER_ZIP).is_file() or not (model_dir / IMX_LABELS_FILE).is_file():
+        return False
+    try:
+        from modlib.devices import AiCamera  # noqa: F401
+        from modlib.models import COLOR_FORMAT, MODEL_TYPE, Model  # noqa: F401
+        from modlib.models.post_processors import pp_od_yolo_ultralytics  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _imx_detections_to_person_info(detections, labels_list: list, confidence_threshold: float = IMX_PERSON_CONFIDENCE_THRESHOLD):
+    """
+    Convert frame.detections from aitrios (post-processed YOLO) to person_info dict.
+    labels_list: list of class names from labels.txt; we filter by PERSON_CLASS_NAME index.
+    """
+    person_info = _empty_person_info()
+    if detections is None or not len(detections):
+        return person_info
+    try:
+        person_idx = next((i for i, L in enumerate(labels_list) if str(L).strip().lower() == PERSON_CLASS_NAME.lower()), None)
+        if person_idx is None:
+            return person_info
+        # frame.detections: often has .confidence, .class_id, and .xyxy or box data (see Ultralytics IMX500 docs)
+        conf = getattr(detections, "confidence", None)
+        class_ids = getattr(detections, "class_id", None)
+        if conf is None or class_ids is None:
+            return person_info
+        import numpy as np
+        conf = np.asarray(conf).ravel()
+        class_ids = np.asarray(class_ids).ravel()
+        n = min(len(conf), len(class_ids))
+        xyxy = getattr(detections, "xyxy", None) or getattr(detections, "boxes", None) or getattr(detections, "bbox", None)
+        for i in range(n):
+            if float(conf[i]) < confidence_threshold or int(class_ids[i]) != person_idx:
+                continue
+            person_info["detected"] = True
+            person_info["count"] += 1
+            if xyxy is not None:
+                arr = np.asarray(xyxy)
+                if arr.ndim >= 2 and i < len(arr):
+                    box = arr[i].ravel()
+                else:
+                    box = np.zeros(4, dtype=np.float64)
+            else:
+                box = np.zeros(4, dtype=np.float64)
+            person_info["boxes"].append({"box": box, "confidence": float(conf[i])})
+    except Exception:
+        return _empty_person_info()
+    return person_info
 
 
 def _get_class_name(class_names, class_id: int) -> str:
@@ -80,9 +173,9 @@ def _parse_args():
     parser.add_argument("--camera", type=int, default=0, help="Camera index for cv2.VideoCapture.")
     parser.add_argument(
         "--capture",
-        choices=["auto", "opencv", "picamera2"],
+        choices=["auto", "opencv", "picamera2", "imx"],
         default="auto",
-        help="Frame capture backend. Use picamera2 for Raspberry Pi CSI/AI Camera via libcamera.",
+        help="Capture backend: imx = Raspberry Pi AI Camera (IMX500) on-sensor inference; picamera2 = libcamera + CPU YOLO.",
     )
     parser.add_argument(
         "--v4l2",
@@ -114,6 +207,11 @@ def _parse_args():
 
     parser.add_argument("--model", default="yolo26n_ncnn_model", help="Preferred model path/name (e.g., NCNN model).")
     parser.add_argument("--fallback-model", default="yolo26n.pt", help="Fallback model path/name (auto-download if missing).")
+    parser.add_argument(
+        "--imx-model-dir",
+        default=DEFAULT_IMX_MODEL_DIR,
+        help="IMX model directory name under backend/vision (e.g. yolo11n_imx_model). Used when --capture imx.",
+    )
 
     parser.add_argument("--save-dir", default="", help="Directory to save annotated frames (empty disables).")
     parser.add_argument("--save-every", type=int, default=0, help="Save annotated frame every N frames (0 disables).")
@@ -215,6 +313,7 @@ def _capture_args_from_dict(config: dict):
     a.width = config.get("width", 0)
     a.height = config.get("height", 0)
     a.fps = config.get("fps", 0)
+    a.imx_model_dir = config.get("imx_model_dir", DEFAULT_IMX_MODEL_DIR)
     return a
 
 
@@ -248,13 +347,20 @@ def _probe_opencv_device(device, use_v4l2: bool = True) -> bool:
     return ok
 
 
-def list_available_cameras(skip_opencv_if_picamera2_ok: bool = True):
+def list_available_cameras(skip_opencv_if_picamera2_ok: bool = True, vision_dir: Optional[Path] = None):
     """
-    Detect available cameras (Pi 5 libcamera or /dev/video*).
+    Detect available cameras: IMX500 (AI Camera), Pi 5 libcamera (picamera2), /dev/video* (OpenCV).
     Returns list of dicts: [{"backend", "id", "ok", "error"?}, ...].
-    Picamera2 is reported from import only (no camera acquire) to avoid double-acquire.
     """
     out = []
+    vision_dir = vision_dir or _get_vision_dir()
+    imx_ok = _imx_available(vision_dir)
+    out.append({
+        "backend": "imx",
+        "id": "ai_camera",
+        "ok": imx_ok,
+        "error": None if imx_ok else "IMX model or modlib unavailable",
+    })
     picamera2_ok = _picamera2_importable()
     out.append({
         "backend": "picamera2",
@@ -262,7 +368,8 @@ def list_available_cameras(skip_opencv_if_picamera2_ok: bool = True):
         "ok": picamera2_ok,
         "error": None if picamera2_ok else "picamera2 not importable",
     })
-    if skip_opencv_if_picamera2_ok and picamera2_ok:
+    # Skip slow OpenCV /dev/video* probe when a primary camera (IMX or picamera2) is available
+    if skip_opencv_if_picamera2_ok and (imx_ok or picamera2_ok):
         return out
     for path in sorted(glob.glob("/dev/video*")):
         ok = _probe_opencv_device(path)
@@ -275,6 +382,112 @@ def list_available_cameras(skip_opencv_if_picamera2_ok: bool = True):
 # -----------------------------------------------------------------------------
 # Detection loop (for AuraBot integration)
 # -----------------------------------------------------------------------------
+
+
+def _run_detection_loop_imx(
+    callback,
+    stop_event,
+    *,
+    vision_dir: Optional[Path] = None,
+    imx_model_dir_name: str = DEFAULT_IMX_MODEL_DIR,
+    warmup_frames: int = 10,
+    report_interval_frames: int = 15,
+    on_frame: Optional[Callable[[], None]] = None,
+    ready_event: Optional[threading.Event] = None,
+    confidence_threshold: float = IMX_PERSON_CONFIDENCE_THRESHOLD,
+):
+    """
+    Run object detection using Raspberry Pi AI Camera (IMX500) on-sensor inference.
+    Uses aitrios modlib: AiCamera + packerOut.zip model + pp_od_yolo_ultralytics.
+    Same callback(person_info) contract as run_detection_loop.
+    """
+    import numpy as np
+    from modlib.devices import AiCamera
+    from modlib.models import COLOR_FORMAT, MODEL_TYPE, Model
+    from modlib.models.post_processors import pp_od_yolo_ultralytics
+
+    vision_dir = vision_dir or _get_vision_dir()
+    model_dir = vision_dir / imx_model_dir_name
+    packer_path = model_dir / IMX_PACKER_ZIP
+    labels_path = model_dir / IMX_LABELS_FILE
+    if not packer_path.is_file() or not labels_path.is_file():
+        callback({**_empty_person_info(), "error": f"IMX model not found: {packer_path} or {labels_path}"})
+        if ready_event:
+            ready_event.set()
+        return
+
+    labels_list = np.genfromtxt(str(labels_path), dtype=str, delimiter="\n")
+    if labels_list.ndim == 0:
+        labels_list = [str(labels_list)]
+    else:
+        labels_list = [str(x) for x in labels_list.tolist()]
+
+    class YOLOIMX(Model):
+        def __init__(self):
+            super().__init__(
+                model_file=str(packer_path),
+                model_type=MODEL_TYPE.CONVERTED,
+                color_format=COLOR_FORMAT.RGB,
+                preserve_aspect_ratio=False,
+            )
+
+        def post_process(self, output_tensors):
+            return pp_od_yolo_ultralytics(output_tensors)
+
+    try:
+        device = AiCamera(frame_rate=IMX_OBJECT_DETECTION_FPS)
+        model = YOLOIMX()
+        device.deploy(model, overwrite=False)  # use existing network.rpk, no prompt
+    except Exception as e:
+        err_msg = str(e)
+        if "libcamera" in err_msg and "v0.6" in err_msg:
+            err_msg += " Upgrade: sudo apt update && sudo apt full-upgrade, then reboot. If still v0.5.x, upgrade Raspberry Pi OS or see backend/vision/IMX_PI_AI_CAMERA_SETUP.md."
+        callback({**_empty_person_info(), "error": f"IMX deploy failed: {err_msg}"})
+        if ready_event:
+            ready_event.set()
+        return
+
+    frame_idx = 0
+    last_status = None
+    warmup_complete = warmup_frames == 0
+    if ready_event and warmup_frames == 0:
+        ready_event.set()
+
+    try:
+        with device as stream:
+            for frame in stream:
+                if stop_event.is_set():
+                    break
+                frame_idx += 1
+                if warmup_frames > 0 and frame_idx <= warmup_frames:
+                    continue
+                if not warmup_complete and ready_event:
+                    ready_event.set()
+                    warmup_complete = True
+
+                if on_frame:
+                    try:
+                        on_frame()
+                    except Exception:
+                        pass
+
+                detections = getattr(frame, "detections", None)
+                person_info = _imx_detections_to_person_info(
+                    detections, labels_list, confidence_threshold=confidence_threshold
+                )
+                status = (person_info["detected"], person_info["count"])
+                if status != last_status:
+                    callback(person_info)
+                    last_status = status
+                elif report_interval_frames > 0 and (frame_idx % report_interval_frames == 0):
+                    callback(person_info)
+    except Exception as e:
+        callback({**_empty_person_info(), "error": str(e)})
+    finally:
+        try:
+            device.close()
+        except Exception:
+            pass
 
 
 def _load_yolo_model(model_name: str, fallback_model: str):
@@ -308,21 +521,41 @@ def run_detection_loop(
     ready_event: optional threading.Event; signaled when model is loaded, camera is open, and warmup is complete.
     """
     capture_args = _capture_args_from_dict(capture_config or {})
+    vision_dir = _get_vision_dir()
+    use_imx = capture_args.capture == "imx" or (
+        capture_args.capture == "auto" and _imx_available(vision_dir, capture_args.imx_model_dir)
+    )
 
-    # Load model (this can take time)
-    model = _load_yolo_model(model_name, fallback_model)
+    if use_imx:
+        _run_detection_loop_imx(
+            callback,
+            stop_event,
+            vision_dir=vision_dir,
+            imx_model_dir_name=capture_args.imx_model_dir,
+            warmup_frames=warmup_frames,
+            report_interval_frames=report_interval_frames,
+            on_frame=on_frame,
+            ready_event=ready_event,
+        )
+        return
 
-    try:
-        # Open camera
-        next_frame, capture_cleanup, _ = _open_capture(capture_args)
-    except Exception as e:
-        callback({**_empty_person_info(), "error": str(e)})
-        # Signal ready_event even on error so main thread doesn't wait forever
+    # CPU path: Picamera2 or OpenCV + YOLO
+    if YOLO is None:
+        callback({**_empty_person_info(), "error": "ultralytics not installed (required for CPU capture)"})
         if ready_event:
             ready_event.set()
         return
 
-    # Signal ready immediately if warmup is disabled (model loaded, camera open)
+    model = _load_yolo_model(model_name, fallback_model)
+
+    try:
+        next_frame, capture_cleanup, _ = _open_capture(capture_args)
+    except Exception as e:
+        callback({**_empty_person_info(), "error": str(e)})
+        if ready_event:
+            ready_event.set()
+        return
+
     if ready_event and warmup_frames == 0:
         ready_event.set()
 
@@ -330,14 +563,13 @@ def run_detection_loop(
         frame_idx = 0
         last_status = None
         consecutive_failures = 0
-        warmup_complete = warmup_frames == 0  # Already signaled if warmup disabled
+        warmup_complete = warmup_frames == 0
 
         while not stop_event.is_set():
             frame = next_frame()
             if frame is None:
                 consecutive_failures += 1
                 if consecutive_failures >= read_retries:
-                    # Signal ready_event on failure so main thread doesn't wait forever
                     if ready_event and not warmup_complete:
                         ready_event.set()
                     break
@@ -346,11 +578,9 @@ def run_detection_loop(
             consecutive_failures = 0
             frame_idx += 1
 
-            # Complete warmup before signaling ready
             if warmup_frames > 0 and frame_idx <= warmup_frames:
                 continue
 
-            # Signal ready after warmup is complete (only once)
             if not warmup_complete and ready_event:
                 ready_event.set()
                 warmup_complete = True
@@ -437,8 +667,162 @@ def _main_process_frame(args, model, frame, frame_idx, last_status, last_save_ti
     return person_info, annotated_frame, status, new_save_time, vw
 
 
+def _main_imx_loop(args, save_dir: Optional[Path], output_video_path: Optional[Path]):
+    """CLI loop using Raspberry Pi AI Camera (IMX500) on-sensor inference."""
+    import numpy as np
+    from modlib.apps import Annotator
+    from modlib.devices import AiCamera
+    from modlib.models import COLOR_FORMAT, MODEL_TYPE, Model
+    from modlib.models.post_processors import pp_od_yolo_ultralytics
+
+    vision_dir = _get_vision_dir()
+    model_dir = vision_dir / args.imx_model_dir
+    packer_path = model_dir / IMX_PACKER_ZIP
+    labels_path = model_dir / IMX_LABELS_FILE
+    if not packer_path.is_file() or not labels_path.is_file():
+        print(f"Error: IMX model not found. Expected {packer_path} and {labels_path}")
+        print("Export with: python backend/vision/setup_imx_model.py --model yolo11n.pt --imgsz 640")
+        return
+
+    labels_list = np.genfromtxt(str(labels_path), dtype=str, delimiter="\n")
+    if labels_list.ndim == 0:
+        labels_list = [str(labels_list)]
+    else:
+        labels_list = [str(x) for x in labels_list.tolist()]
+
+    class YOLOIMX(Model):
+        def __init__(self):
+            super().__init__(
+                model_file=str(packer_path),
+                model_type=MODEL_TYPE.CONVERTED,
+                color_format=COLOR_FORMAT.RGB,
+                preserve_aspect_ratio=False,
+            )
+
+        def post_process(self, output_tensors):
+            return pp_od_yolo_ultralytics(output_tensors)
+
+    try:
+        device = AiCamera(frame_rate=IMX_OBJECT_DETECTION_FPS)
+        model = YOLOIMX()
+        device.deploy(model, overwrite=False)  # use existing network.rpk, no prompt
+    except Exception as e:
+        err_msg = str(e)
+        if "libcamera" in err_msg and "v0.6" in err_msg:
+            err_msg += "\nUpgrade libcamera: sudo apt update && sudo apt full-upgrade, then reboot. If still v0.5.x, see backend/vision/IMX_PI_AI_CAMERA_SETUP.md."
+        print(f"Error: IMX deploy failed: {err_msg}")
+        return
+
+    save_dir = save_dir if save_dir else None
+    output_video_path = output_video_path if output_video_path else None
+    print("Starting real-time object detection (Raspberry Pi AI Camera, on-sensor). Press Ctrl+C to stop.")
+
+    frame_idx = 0
+    last_status = None
+    last_save_time = 0.0
+    video_writer = None
+    annotator = Annotator()
+
+    try:
+        with device as stream:
+            for frame in stream:
+                frame_idx += 1
+                if args.warmup_frames > 0 and frame_idx <= args.warmup_frames:
+                    continue
+
+                detections = getattr(frame, "detections", None)
+                person_info = _imx_detections_to_person_info(
+                    detections, labels_list, confidence_threshold=IMX_PERSON_CONFIDENCE_THRESHOLD
+                )
+                status = (person_info["detected"], person_info["count"])
+
+                # Annotate: frame.image is RGB; draw boxes for detections above threshold (Ultralytics IMX500 example style)
+                detections_filtered = detections
+                if detections is not None and hasattr(detections, "confidence"):
+                    mask = np.asarray(detections.confidence).ravel() >= IMX_PERSON_CONFIDENCE_THRESHOLD
+                    if hasattr(detections, "__getitem__") and np.any(mask):
+                        detections_filtered = detections[mask]
+                    elif not np.any(mask):
+                        detections_filtered = None
+                if detections_filtered is not None and len(detections_filtered):
+                    try:
+                        labels_str = [
+                            f"{labels_list[int(c)]}: {s:.2f}"
+                            for _, s, c, _ in detections_filtered
+                        ]
+                    except (ValueError, TypeError):
+                        conf = getattr(detections_filtered, "confidence", None)
+                        cid = getattr(detections_filtered, "class_id", None)
+                        labels_str = [
+                            f"{labels_list[int(c)]}: {s:.2f}"
+                            for c, s in zip(np.asarray(cid).ravel(), np.asarray(conf).ravel())
+                        ] if (conf is not None and cid is not None) else []
+                    try:
+                        annotator.annotate_boxes(frame, detections_filtered, labels=labels_str, alpha=0.3, corner_radius=10)
+                    except Exception:
+                        pass
+                img_bgr = cv2.cvtColor(frame.image, cv2.COLOR_RGB2BGR)
+
+                if status != last_status:
+                    if person_info["detected"]:
+                        print(f"Person detected! Count: {person_info['count']}")
+                        for idx, p in enumerate(person_info["boxes"], 1):
+                            box, conf = p["box"], p["confidence"]
+                            print(f"  Person {idx}: confidence={conf:.2f}, bbox=[{box[0]:.0f}, {box[1]:.0f}, {box[2]:.0f}, {box[3]:.0f}]")
+                    else:
+                        print("No person detected")
+                elif args.log_every > 0 and (frame_idx % args.log_every == 0):
+                    print(f"Heartbeat: frame={frame_idx}, detected={person_info['detected']}, count={person_info['count']}")
+
+                if output_video_path and video_writer is None:
+                    h, w = img_bgr.shape[:2]
+                    video_writer = cv2.VideoWriter(
+                        str(output_video_path), cv2.VideoWriter_fourcc(*"mp4v"), float(IMX_OBJECT_DETECTION_FPS), (w, h)
+                    )
+                if video_writer is not None:
+                    video_writer.write(img_bgr)
+
+                now = time.time()
+                if save_dir:
+                    save_periodic = args.save_every > 0 and (frame_idx % args.save_every == 0)
+                    save_on_detect = args.save_on_detect and person_info["detected"] and (now - last_save_time) >= args.min_save_interval
+                    if save_periodic or save_on_detect:
+                        cv2.imwrite(str(save_dir / f"frame_{frame_idx:06d}.jpg"), img_bgr)
+                        last_save_time = now
+
+                last_status = status
+
+                if args.max_frames > 0 and frame_idx >= args.max_frames:
+                    print(f"Reached max frames ({args.max_frames}). Stopping.")
+                    break
+    except KeyboardInterrupt:
+        print("\nStopping (Ctrl+C).")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        try:
+            device.close()
+        except Exception:
+            pass
+        if video_writer is not None:
+            video_writer.release()
+        print("Detection stopped.")
+
+
 def main():
     args = _parse_args()
+
+    if args.capture == "imx":
+        vision_dir = _get_vision_dir()
+        if not _imx_available(vision_dir, args.imx_model_dir):
+            print("Error: IMX (Raspberry Pi AI Camera) not available.")
+            print("Install: sudo apt install imx500-all, pip install git+https://github.com/SonySemiconductorSolutions/aitrios-rpi-application-module-library.git")
+            print("Export model: python backend/vision/setup_imx_model.py --model yolo11n.pt --imgsz 640")
+            return
+        save_dir, output_video_path = _main_setup_outputs(args)
+        _main_imx_loop(args, save_dir, output_video_path)
+        return
+
     model = _load_yolo_model(args.model, args.fallback_model)
     if not os.path.exists(args.model) and not os.path.exists(args.fallback_model):
         print(f"Model not found. Using default (will auto-download): {args.fallback_model}")
