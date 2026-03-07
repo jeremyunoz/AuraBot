@@ -1,50 +1,64 @@
-# Vision Module - Object Detection
+# Vision Module
 
-Real-time object detection using YOLO for Raspberry Pi 5.
+Real-time person detection for Raspberry Pi, with two model targets:
 
-## Setup on Pi5
+- `NCNN` for on-device inference in this project (`object_detection.py`)
+- `IMX` for Raspberry Pi AI Camera (Sony IMX500) export (`.rpk`)
 
-### 1. Install Dependencies
+## Workflow A: NCNN runtime for this project
+
+Use this when you want AuraBot camera detection running through `object_detection.py`.
+
+### 1. Install runtime dependencies
+
+From project root:
 
 ```bash
-pip install -r ../requirements.txt
+pip install -r requirements.txt
 ```
 
-### 2. Setup Model (First Time Only)
-
-The model files are too large for git. Run this once on your Pi5:
+### 2. Export/download NCNN model (first time)
 
 ```bash
 cd backend/vision
 python setup_model.py
 ```
 
-This will:
-- Download the YOLO26n model (latest version)
-- Convert it to NCNN format (optimized for Pi5)
-- Save it as `yolo26n_ncnn_model/`
+This creates `yolo26n_ncnn_model/`.
 
-### 3. Run Detection
+### 3. Run detection
+
+From project root:
 
 ```bash
 python backend/vision/object_detection.py
 ```
 
-### 4. Measure inference latency (benchmark)
+## Workflow B: IMX export for Raspberry Pi AI Camera
 
-To measure per-frame inference latency (e.g. for reporting "X ms on Raspberry Pi 5"):
+Use this when you only need model export to IMX500 `.rpk` (not full project runtime install).
 
-From the project root (`AuraBot/`):
+From project root:
 
 ```bash
-# Synthetic frame (no camera); quick and reproducible
-python -m backend.vision.benchmark_yolo_latency --warmup 10 --runs 50
-
-# Live camera (real-world Pi 5 latency)
-python -m backend.vision.benchmark_yolo_latency --camera --warmup 5 --runs 30
-
-# One-line output (mean ms and FPS only)
-python -m backend.vision.benchmark_yolo_latency --quiet
+./scripts/setup_pi_venv.sh .venv
+source .venv/bin/activate
+python backend/vision/setup_imx_model.py --model yolo11n.pt --imgsz 640
 ```
 
-Output includes mean/min/max/std of inference time (ms) and equivalent FPS. Use the mean ms value for the README claim.
+Detailed setup/deploy notes: `backend/vision/IMX_PI_AI_CAMERA_SETUP.md`.
+
+## Benchmark (NCNN runtime path)
+
+Measure YOLO inference latency from project root:
+
+```bash
+# Synthetic frame (no camera)
+python -m backend.vision.benchmark_yolo_latency --warmup 10 --runs 50
+
+# Live camera
+python -m backend.vision.benchmark_yolo_latency --camera --warmup 5 --runs 30
+
+# Mean ms + FPS only
+python -m backend.vision.benchmark_yolo_latency --quiet
+```
