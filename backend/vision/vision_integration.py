@@ -5,22 +5,28 @@ so session start/pause and wellness logic use the camera as a presence source.
 """
 
 import os
-import sys
 import threading
 import time
 from typing import Any, Optional, Tuple
 
-# Default model names (paths resolved relative to project/vision)
+# Default model names
 DEFAULT_MODEL_NAME = "yolo26n_ncnn_model"
 DEFAULT_FALLBACK_MODEL = "yolo26n.pt"
 
 
 def _resolve_vision_paths(backend_dir: str, model_name: str, fallback_model: str) -> Tuple[str, str]:
-    """Resolve model paths relative to project/vision. Returns (model_path, fallback_path)."""
-    project_root = os.path.dirname(backend_dir)
-    vision_dir = os.path.join(project_root, "vision")
-    model_path = os.path.join(vision_dir, model_name) if not os.path.isabs(model_name) else model_name
-    fallback_path = os.path.join(vision_dir, fallback_model) if not os.path.isabs(fallback_model) else fallback_model
+    """
+    Resolve model paths under backend/vision.
+    """
+    backend_vision_dir = os.path.join(backend_dir, "vision")
+
+    def _resolve(name: str) -> str:
+        if os.path.isabs(name):
+            return name
+        return os.path.join(backend_vision_dir, name)
+
+    model_path = _resolve(model_name)
+    fallback_path = _resolve(fallback_model)
     return model_path, fallback_path
 
 
@@ -29,7 +35,7 @@ def _build_capture_config(capture_config: Optional[dict]) -> dict:
     effective = dict(capture_config or {})
     if "capture" not in effective:
         try:
-            from vision.object_detection import _picamera2_importable
+            from backend.vision.object_detection import _picamera2_importable
             effective["capture"] = "picamera2" if _picamera2_importable() else "auto"
         except ImportError:
             effective["capture"] = "auto"
@@ -42,7 +48,7 @@ def _log_available_cameras(aurabot: Any) -> None:
     if not logger:
         return
     try:
-        from vision.object_detection import list_available_cameras
+        from backend.vision.object_detection import list_available_cameras
         cameras = list_available_cameras()
         available = [c for c in cameras if c.get("ok")]
         if available:
@@ -113,11 +119,8 @@ def start_vision_integration(
         setattr(aurabot, "last_camera_activity", time.time())
 
     def run_vision_thread() -> None:
-        project_root = os.path.dirname(backend_dir)
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
         try:
-            from vision.object_detection import run_detection_loop
+            from backend.vision.object_detection import run_detection_loop
         except ImportError as e:
             if getattr(aurabot, "logger", None):
                 aurabot.logger.log_error(f"Vision module not available: {e}")
