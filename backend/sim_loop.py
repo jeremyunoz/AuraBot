@@ -58,6 +58,7 @@ class AuraBot:
         pir_gpio_pin: int = 17,
         pir_poll_interval_seconds: float = 0.2,
         pir_heartbeat_seconds: float = 15.0,
+        pir_warmup_seconds: float = 30.0,
         enable_llm: bool = True,
         llm_backend: str = "gemini",
         gemini_api_key: Optional[str] = None,
@@ -80,12 +81,13 @@ class AuraBot:
             greeting: Initial greeting message
             log_file: Optional custom log file path
             custom_responses: Optional custom response dictionary
-            enable_mqtt: Whether to enable MQTT integration for sensor data
-            enable_vision: Whether to use camera for presence (person detection); requires enable_mqtt
+            enable_mqtt: Whether to enable MQTT broker transport/integration
+            enable_vision: Whether to use camera for presence (person detection)
             enable_pir_gpio: Whether to read a local PIR sensor from Raspberry Pi GPIO
             pir_gpio_pin: Raspberry Pi BCM GPIO pin connected to PIR OUT
             pir_poll_interval_seconds: PIR polling interval in seconds
             pir_heartbeat_seconds: Max time between PIR publishes when state is unchanged
+            pir_warmup_seconds: PIR stabilization warm-up duration in seconds
             enable_llm: Whether to enable LLM-powered conversation
             llm_backend: Deprecated alias for the primary LLM backend ("gemini" or "ollama").
             gemini_api_key: Google AI API key (or set GEMINI_API_KEY env var)
@@ -245,19 +247,20 @@ class AuraBot:
             custom_responses, self.timer_manager, llm_client=llm_client
         )
 
-        # Initialize MQTT integration (optional). DEPRECATED: TTS-over-MQTT (aurabot/tts/speak) is no longer used; voice uses WebSocket TTS.
+        # Initialize sensor/session API (always on) and MQTT transport (optional).
+        # DEPRECATED: TTS-over-MQTT (aurabot/tts/speak) is no longer used; voice uses WebSocket TTS.
         self.mqtt_api: Optional[MQTTAPI] = None
         self.mqtt_integration: Optional[MQTTIntegration] = None
 
-        if enable_mqtt:
-            try:
-                self.mqtt_api = MQTTAPI(
-                    self,
-                    wellness_threshold_seconds=wellness_threshold_seconds,
-                    wellness_break_duration_seconds=wellness_break_duration_seconds,
-                    wellness_pause_timeout_seconds=wellness_pause_timeout_seconds,
-                    logger=self.logger
-                )
+        try:
+            self.mqtt_api = MQTTAPI(
+                self,
+                wellness_threshold_seconds=wellness_threshold_seconds,
+                wellness_break_duration_seconds=wellness_break_duration_seconds,
+                wellness_pause_timeout_seconds=wellness_pause_timeout_seconds,
+                logger=self.logger
+            )
+            if enable_mqtt:
                 self.mqtt_integration = MQTTIntegration(self.mqtt_api)
                 # DEPRECATED: TTSWithMQTT publishes to aurabot/tts/speak; prefer Voice WebSocket for TTS.
                 self.tts_engine = TTSWithMQTT(self._tts_engine_raw, self.mqtt_integration)
@@ -265,9 +268,9 @@ class AuraBot:
                 self.timer_manager.tts_engine = self.tts_engine
                 self.mqtt_api.tts_engine = self.tts_engine
                 self.mqtt_api.wellness_trigger.tts_engine = self.tts_engine
-            except Exception as e:
-                self.logger.log_error(f"Could not initialize MQTT integration: {e}")
-                self.logger.log_general("Continuing without MQTT support...", "WARNING")
+        except Exception as e:
+            self.logger.log_error(f"Could not initialize sensor API: {e}")
+            self.logger.log_general("Continuing without sensor/session automation support...", "WARNING")
         
         self._enable_vision = enable_vision
         self._vision_stop_event = None
@@ -276,9 +279,12 @@ class AuraBot:
         self._pir_gpio_pin = pir_gpio_pin
         self._pir_poll_interval_seconds = pir_poll_interval_seconds
         self._pir_heartbeat_seconds = pir_heartbeat_seconds
+        self._pir_warmup_seconds = pir_warmup_seconds
         self._pir_integration = None
         self._pir_stop_event = None
         self._pir_ready_event = None
+        self.pir_warmed_up = False
+        self.pir_warmed_up_at = None
         self._is_running = False
     
     def start_services(self):
@@ -292,7 +298,7 @@ class AuraBot:
             except Exception as e:
                 self.logger.log_error(f"MQTT integration failed to start: {e}")
 
-        # Start local PIR GPIO integration if enabled; feeds motion into MQTT sensor API.
+        # Start local PIR GPIO integration if enabled; feeds motion into local sensor API.
         if self._enable_pir_gpio and self.mqtt_api:
             try:
                 (
@@ -304,6 +310,7 @@ class AuraBot:
                     gpio_pin=self._pir_gpio_pin,
                     poll_interval_seconds=self._pir_poll_interval_seconds,
                     heartbeat_seconds=self._pir_heartbeat_seconds,
+                    warmup_seconds=self._pir_warmup_seconds,
                 )
                 if self._pir_ready_event:
                     self._pir_ready_event.wait(timeout=3.0)
@@ -311,11 +318,11 @@ class AuraBot:
                 self.logger.log_error(f"PIR GPIO integration failed to start: {e}")
         elif self._enable_pir_gpio:
             self.logger.log_general(
-                "PIR GPIO integration requested but MQTT API is disabled",
+                "PIR GPIO integration requested but sensor API is unavailable",
                 "WARNING",
             )
         
-        # Start vision (camera) integration if enabled; feeds camera_confirmed into MQTT sensor API
+        # Start vision (camera) integration if enabled; feeds camera_confirmed into local sensor API
         if self._enable_vision and self.mqtt_api:
             try:
                 self.mqtt_api.set_presence_fusion(True)  # Require camera AND PIR to infer presence
@@ -532,12 +539,13 @@ def main():
     Main entry point for the chatbot.
     
     Configuration via environment variables:
-    - ENABLE_MQTT: Set to "false" to disable MQTT (default: enabled)
+    - ENABLE_MQTT: Set to "false" to disable MQTT broker transport (default: enabled)
     - ENABLE_VISION: Set to "true" to use camera for presence (default: disabled)
     - ENABLE_PIR_GPIO: Set to "true" to read PIR sensor from Raspberry Pi GPIO (default: disabled)
     - PIR_GPIO_PIN: BCM GPIO pin number for local PIR sensor (default: 17)
     - PIR_POLL_INTERVAL_SECONDS: PIR polling interval (default: 0.2)
     - PIR_HEARTBEAT_SECONDS: Re-publish PIR state if unchanged after this many seconds (default: 15)
+    - PIR_WARMUP_SECONDS: PIR warm-up duration before publishing sensor events (default: 30)
     - VOICE_WS_PORT: Port for the voice WebSocket server (default: 8765)
     - ENABLE_LLM: Set to "false" to disable LLM conversation (default: enabled)
     - LLM_BACKEND: Deprecated alias for primary backend; prefer LLM_PRIMARY_BACKEND
@@ -553,13 +561,14 @@ def main():
     - WELLNESS_BREAK_DURATION_SECONDS: Duration of wellness break timer
     - WELLNESS_PAUSE_TIMEOUT_SECONDS: Seconds to wait while paused before stopping session
     """
-    # Check MQTT enable/disable
+    # Check MQTT transport enable/disable
     enable_mqtt = os.getenv("ENABLE_MQTT", "true").lower() != "false"
     enable_vision = os.getenv("ENABLE_VISION", "false").lower() == "true"
     enable_pir_gpio = os.getenv("ENABLE_PIR_GPIO", "false").lower() == "true"
     pir_gpio_pin = int(os.getenv("PIR_GPIO_PIN", "17"))
     pir_poll_interval_seconds = float(os.getenv("PIR_POLL_INTERVAL_SECONDS", "0.2"))
     pir_heartbeat_seconds = float(os.getenv("PIR_HEARTBEAT_SECONDS", "15"))
+    pir_warmup_seconds = float(os.getenv("PIR_WARMUP_SECONDS", "30"))
     voice_ws_port = int(os.getenv("VOICE_WS_PORT", "8765"))
 
     # LLM configuration
@@ -594,6 +603,7 @@ def main():
         pir_gpio_pin=pir_gpio_pin,
         pir_poll_interval_seconds=pir_poll_interval_seconds,
         pir_heartbeat_seconds=pir_heartbeat_seconds,
+        pir_warmup_seconds=pir_warmup_seconds,
         enable_llm=enable_llm,
         llm_backend=llm_primary_backend,
         gemini_api_key=gemini_api_key,
@@ -610,7 +620,7 @@ def main():
     )
     
     # Log configuration if set
-    if enable_mqtt and (wellness_threshold is not None or break_duration is not None or pause_timeout is not None):
+    if wellness_threshold is not None or break_duration is not None or pause_timeout is not None:
         config_msg = "Wellness timer configuration:"
         metadata = {}
         if wellness_threshold is not None:
@@ -638,6 +648,7 @@ def main():
                 "pin": pir_gpio_pin,
                 "poll_interval_seconds": pir_poll_interval_seconds,
                 "heartbeat_seconds": pir_heartbeat_seconds,
+                "warmup_seconds": pir_warmup_seconds,
             },
         )
 

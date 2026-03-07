@@ -1,7 +1,7 @@
 """
 Vision integration for AuraBot.
-Runs camera-based person detection and feeds camera_confirmed into the MQTT sensor API
-so session start/pause and wellness logic use the camera as a presence source.
+Runs camera-based person detection and feeds camera_confirmed into the server-side
+sensor API so session start/pause and wellness logic use the camera as a presence source.
 """
 
 import os
@@ -64,8 +64,8 @@ def _log_available_cameras(aurabot: Any) -> None:
         logger.log_general(f"Vision camera check failed: {e}", "WARNING")
 
 
-def _send_presence_to_mqtt(aurabot: Any, person_info: dict) -> None:
-    """Send camera_confirmed (presence) to MQTT sensor API. Normalizes person_info on error."""
+def _send_presence_to_sensor_api(aurabot: Any, person_info: dict) -> None:
+    """Send camera_confirmed (presence) to server-side sensor API."""
     if "error" in person_info:
         if getattr(aurabot, "logger", None):
             aurabot.logger.log_general(f"Vision error: {person_info['error']}", "WARNING")
@@ -102,7 +102,7 @@ def start_vision_integration(
     """
     if not getattr(aurabot, "mqtt_api", None):
         if getattr(aurabot, "logger", None):
-            aurabot.logger.log_general("Vision integration skipped: MQTT API not available", "WARNING")
+            aurabot.logger.log_general("Vision integration skipped: sensor API not available", "WARNING")
         return None, None
 
     # backend/vision/vision_integration.py -> backend root is parent of vision
@@ -112,7 +112,7 @@ def start_vision_integration(
     ready_event = threading.Event()
 
     def on_detection(person_info: dict) -> None:
-        _send_presence_to_mqtt(aurabot, person_info)
+        _send_presence_to_sensor_api(aurabot, person_info)
 
     def on_frame_heartbeat() -> None:
         """Called every successful frame so dashboard camera status updates promptly."""

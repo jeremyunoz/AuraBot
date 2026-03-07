@@ -141,6 +141,8 @@ def _build_status(bot) -> dict:
     # PIR: online if local PIR integration enabled and activity received recently.
     pir_enabled = getattr(bot, "_enable_pir_gpio", False)
     out["pir_enabled"] = pir_enabled
+    out["pir_warmed_up"] = bool(getattr(bot, "pir_warmed_up", False))
+    out["pir_warmed_up_at"] = getattr(bot, "pir_warmed_up_at", None)
     last_pir = getattr(bot, "last_pir_activity", None)
     out["pir_online"] = (
         pir_enabled

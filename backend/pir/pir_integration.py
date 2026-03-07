@@ -1,8 +1,8 @@
 """
 PIR sensor integration for AuraBot.
 
-Reads a local PIR GPIO pin and forwards motion state into the existing
-MQTTAPI sensor pipeline so session/wellness behavior is reused.
+Reads a local PIR GPIO pin and forwards motion state into the server-side
+sensor/session pipeline so session/wellness behavior is reused.
 """
 
 import threading
@@ -81,7 +81,7 @@ def _create_motion_adapter(pin: int) -> _BaseMotionAdapter:
 
 
 class PIRSensorIntegration:
-    """Background PIR reader that feeds AuraBot MQTTAPI sensor flow."""
+    """Background PIR reader that feeds AuraBot server-side sensor flow."""
 
     def __init__(
         self,
@@ -90,14 +90,17 @@ class PIRSensorIntegration:
         gpio_pin: int = 17,
         poll_interval_seconds: float = 0.2,
         heartbeat_seconds: float = 15.0,
+        warmup_seconds: float = 30.0,
     ):
         self.aurabot = aurabot
         self.gpio_pin = gpio_pin
         self.poll_interval_seconds = max(0.05, float(poll_interval_seconds))
         self.heartbeat_seconds = max(1.0, float(heartbeat_seconds))
+        self.warmup_seconds = max(0.0, float(warmup_seconds))
 
         self._stop_event = threading.Event()
         self._ready_event = threading.Event()
+        self._warmed_up_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._adapter: Optional[_BaseMotionAdapter] = None
         self._sequence = 0
@@ -109,6 +112,9 @@ class PIRSensorIntegration:
 
         self._stop_event.clear()
         self._ready_event.clear()
+        self._warmed_up_event.clear()
+        setattr(self.aurabot, "pir_warmed_up", False)
+        setattr(self.aurabot, "pir_warmed_up_at", None)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self._stop_event, self._ready_event
@@ -130,10 +136,10 @@ class PIRSensorIntegration:
 
     def _run(self) -> None:
         logger = getattr(self.aurabot, "logger", None)
-        mqtt_api = getattr(self.aurabot, "mqtt_api", None)
-        if not mqtt_api:
+        sensor_api = getattr(self.aurabot, "mqtt_api", None)
+        if not sensor_api:
             if logger:
-                logger.log_sensor("PIR integration skipped: MQTT API not available", "WARNING")
+                logger.log_sensor("PIR integration skipped: sensor API not available", "WARNING")
             return
 
         try:
@@ -151,10 +157,19 @@ class PIRSensorIntegration:
                     "pin": self.gpio_pin,
                     "poll_interval_seconds": self.poll_interval_seconds,
                     "heartbeat_seconds": self.heartbeat_seconds,
+                    "warmup_seconds": self.warmup_seconds,
                 },
             )
 
         self._ready_event.set()
+        warmup_deadline = time.time() + self.warmup_seconds
+        if self.warmup_seconds > 0 and logger:
+            logger.log_sensor(
+                f"PIR warm-up started for {self.warmup_seconds:.1f}s (non-blocking)",
+                "INFO",
+                metadata={"warmup_seconds": self.warmup_seconds},
+            )
+
         last_motion: Optional[int] = None
         last_publish = 0.0
 
@@ -162,6 +177,18 @@ class PIRSensorIntegration:
             try:
                 motion = self._adapter.read_motion() if self._adapter else 0
                 now = time.time()
+
+                if not self._warmed_up_event.is_set():
+                    if now >= warmup_deadline:
+                        self._warmed_up_event.set()
+                        setattr(self.aurabot, "pir_warmed_up", True)
+                        setattr(self.aurabot, "pir_warmed_up_at", now)
+                        if logger:
+                            logger.log_sensor("PIR warm-up completed", "INFO")
+                    else:
+                        self._stop_event.wait(self.poll_interval_seconds)
+                        continue
+
                 should_publish = (
                     last_motion is None
                     or motion != last_motion
@@ -169,7 +196,7 @@ class PIRSensorIntegration:
                 )
                 if should_publish:
                     self._sequence += 1
-                    mqtt_api.handle_sensor_data(
+                    sensor_api.handle_sensor_data(
                         {
                             "motion": motion,
                             "ts_us": int(now * 1_000_000),
@@ -198,6 +225,7 @@ def start_pir_integration(
     gpio_pin: int = 17,
     poll_interval_seconds: float = 0.2,
     heartbeat_seconds: float = 15.0,
+    warmup_seconds: float = 30.0,
 ) -> tuple[Optional[PIRSensorIntegration], Optional[threading.Event], Optional[threading.Event]]:
     """
     Start local PIR GPIO integration.
@@ -210,6 +238,7 @@ def start_pir_integration(
         gpio_pin=gpio_pin,
         poll_interval_seconds=poll_interval_seconds,
         heartbeat_seconds=heartbeat_seconds,
+        warmup_seconds=warmup_seconds,
     )
     stop_event, ready_event = integration.start()
     return integration, stop_event, ready_event

@@ -1,6 +1,6 @@
 # AuraBot
 
-A voice-activated wellness chatbot that uses speech-to-text and text-to-speech for interactive conversations, wellness reminders, and presence-aware session tracking. Combines ESP32 sensors, Raspberry Pi vision, and MQTT for a multi-device setup.
+A voice-activated wellness chatbot that uses speech-to-text and text-to-speech for interactive conversations, wellness reminders, and presence-aware session tracking. Supports both ESP32+MQTT multi-device setups and fully local Raspberry Pi sensor processing (PIR + camera) on the server.
 
 ## Features
 
@@ -14,10 +14,10 @@ A voice-activated wellness chatbot that uses speech-to-text and text-to-speech f
 -  ⏰ **Timer Management**: Set, query, and cancel timers via voice (natural language support)
 -  ⏱️ **Session Timer**: Tracks sitting time with pause/resume (presence-aware)
 -  🏃 **Wellness Timer Trigger**: Automatically suggests breaks after extended sitting
--  👁️ **Presence Detection**: PIR sensor (ESP32) + optional camera (Pi) drive session start/pause
+-  👁️ **Presence Detection**: ESP32 PIR or local Pi PIR + optional camera drive session start/pause
 
 ### Hardware & Integration
--  📡 **ESP32 + MQTT**: PIR motion sensor publishes to `aurabot/sensors`
+-  📡 **ESP32 + MQTT (optional transport)**: PIR motion sensor publishes to `aurabot/sensors`
 -  📷 **Vision Module**: YOLO person detection on Raspberry Pi 5 (camera_confirmed)
 -  📊 **Web Dashboard**: Status, session controls, timers, wellness config (port 8000)
 -  🧪 **Presence Simulator**: `presence_sim.sh` for testing without hardware
@@ -27,7 +27,7 @@ A voice-activated wellness chatbot that uses speech-to-text and text-to-speech f
 -  Python 3.7+
 -  Microphone access
 -  Internet connection (for Google Speech Recognition API)
--  MQTT broker (e.g. Mosquitto) for sensor integration
+-  Optional: MQTT broker (e.g. Mosquitto) for ESP32 transport/integration
 -  Optional: ESP32 with PIR sensor; Raspberry Pi 5 for vision
 
 ## Installation
@@ -72,7 +72,7 @@ cd backend
 python sim_loop.py
 ```
 
-- Starts the voice loop, MQTT integration (if enabled), and web dashboard at http://localhost:8000
+- Starts the voice loop, local sensor/session API, optional MQTT integration, and web dashboard at http://localhost:8000
 - Use `backend/.env` for `MQTT_HOST`, `MQTT_PORT`, `MQTT_USERNAME`, `MQTT_PASSWORD`
 - **Voice**: By default the ESP32 records sound (WebSocket to Pi); Pi runs ASR/LLM/TTS and sends TTS Opus back. Set `ENABLE_VOICE_WS=false` to use the Pi microphone instead. See "Voice session" below.
 - **LLM backends**: Set `LLM_BACKEND=gemini` (default) for Google Gemini, or `LLM_BACKEND=ollama` for local Ollama on the Pi. For Ollama, install and start Ollama (`curl -fsSL https://ollama.com/install.sh | sh`), then run `ollama pull tinyllama` (or another small model). Use `OLLAMA_MODEL` and `OLLAMA_HOST` in `.env` to configure.
@@ -88,6 +88,20 @@ DISTANCE_CM=60 MOTION=0 CAMERA_CONFIRMED=0 ./presence_sim.sh
 ```
 
 If your broker requires auth: `MQTT_USER=user MQTT_PASS=pass ./presence_sim.sh`
+
+### Local PIR + camera on server (no MQTT broker required)
+
+If your PIR is connected directly to the Raspberry Pi, AuraBot can process PIR + camera locally and still drive session/wellness timers without MQTT transport:
+
+```bash
+cd backend
+ENABLE_MQTT=false ENABLE_PIR_GPIO=true ENABLE_VISION=true python sim_loop.py
+```
+
+Notes:
+- `ENABLE_MQTT=false` disables broker transport only.
+- The local server still runs presence fusion/session logic and triggers session timer start/pause from onboard PIR + camera.
+- Keep `ENABLE_VISION=false` if you want PIR-only presence.
 
 ### Vision module (Raspberry Pi 5)
 
@@ -202,7 +216,7 @@ AuraBot: Goodbye! Remember to stretch often.
 ```
 AuraBot/
 ├── backend/
-│   ├── sim_loop.py              # Main loop, AuraBot class, MQTT + dashboard startup
+│   ├── sim_loop.py              # Main loop, AuraBot class, local sensor API + optional MQTT + dashboard startup
 │   ├── core/                    # Shared utilities
 │   │   └── logger.py            # Conversation and MQTT logging
 │   ├── llm/                     # Conversation & response routing
@@ -223,7 +237,7 @@ AuraBot/
 │   ├── api/                     # HTTP API
 │   │   └── dashboard_api.py     # FastAPI dashboard (status, sessions, control)
 │   └── vision/                  # Camera presence and YOLO utilities
-│       ├── vision_integration.py # Person detection → MQTT
+│       ├── vision_integration.py # Person detection → server-side sensor API
 │       ├── object_detection.py  # YOLO person detection runtime
 │       └── setup_model.py       # Model download and NCNN conversion
 ├── dashboard/
@@ -250,7 +264,7 @@ AuraBot/
 
 | Package / module | Description |
 |------------------|-------------|
-| `sim_loop.py` | Main loop, AuraBot class; starts MQTT, dashboard, and voice flow |
+| `sim_loop.py` | Main loop, AuraBot class; starts local sensor API, optional MQTT, dashboard, and voice flow |
 | **core** | |
 | `core/logger.py` | Conversation and MQTT logging with category routing |
 | **llm** | |
@@ -267,15 +281,15 @@ AuraBot/
 | `voice/voice_ws_server.py` | Voice WebSocket server (ESP32 ↔ Pi, Opus) |
 | **mqtt** | MQTT client, API, and sensor routing |
 | **api** | FastAPI dashboard (status, sessions, control) |
-| **vision** | Camera person detection feeding presence into MQTT |
+| **vision** | Camera person detection feeding presence into server-side sensor API |
 
 ### MQTT & Dashboard
 
-**Note:** The **Voice/TTS-over-MQTT** path (`aurabot/tts/speak`) is **deprecated**. Voice output now uses the Voice WebSocket (Pi synthesizes TTS and sends Opus to ESP32). MQTT remains used for sensors, control, and dashboard.
+**Note:** The **Voice/TTS-over-MQTT** path (`aurabot/tts/speak`) is **deprecated**. Voice output now uses the Voice WebSocket (Pi synthesizes TTS and sends Opus to ESP32). Session/presence logic runs server-side; MQTT is optional transport for ESP32 sensors/control.
 
 | Module | Description |
 |--------|-------------|
-| `mqtt_api.py` | Handles `aurabot/sensors` and `aurabot/control`; presence debounce; wellness trigger |
+| `mqtt_api.py` | Handles sensor/control payloads; presence debounce; wellness trigger (used by local server and MQTT transport) |
 | `mqtt_integration.py` | MQTT client factory, lifecycle, topic subscription (TTSWithMQTT / `aurabot/tts/speak` deprecated) |
 | `dashboard_api.py` | FastAPI: `/api/status`, `/api/sessions`, `/api/control`, `/api/config` |
 
@@ -298,6 +312,13 @@ MQTT_HOST=127.0.0.1
 MQTT_PORT=1883
 MQTT_USERNAME=       # Optional
 MQTT_PASSWORD=       # Optional
+ENABLE_MQTT=true     # Set false for fully local PIR/camera processing
+ENABLE_PIR_GPIO=false
+ENABLE_VISION=false
+PIR_GPIO_PIN=17
+PIR_POLL_INTERVAL_SECONDS=0.2
+PIR_HEARTBEAT_SECONDS=15
+PIR_WARMUP_SECONDS=30
 ```
 
 ### Microphone (stt.py)
@@ -322,7 +343,7 @@ MQTT_PASSWORD=       # Optional
 
 - `logs/stt_tts_test.log` – conversation log
 - `logs/sitting_sessions.json` – session history
-- MQTT events logged via `AuraBotLogger` when configured
+- Sensor/session and MQTT events are logged via `AuraBotLogger` when configured
 
 ## Dependencies
 
