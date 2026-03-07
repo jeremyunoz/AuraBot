@@ -92,7 +92,7 @@ If your broker requires auth: `MQTT_USER=user MQTT_PASS=pass ./presence_sim.sh`
 ### Vision module (Raspberry Pi 5)
 
 ```bash
-cd vision
+cd backend/vision
 python setup_model.py   # First time only
 python object_detection.py --capture picamera2
 ```
@@ -222,8 +222,10 @@ AuraBot/
 │   │   └── mqtt_integration.py # Client lifecycle and routing
 │   ├── api/                     # HTTP API
 │   │   └── dashboard_api.py     # FastAPI dashboard (status, sessions, control)
-│   └── vision/                  # Camera presence
-│       └── vision_integration.py # Person detection → MQTT
+│   └── vision/                  # Camera presence and YOLO utilities
+│       ├── vision_integration.py # Person detection → MQTT
+│       ├── object_detection.py  # YOLO person detection runtime
+│       └── setup_model.py       # Model download and NCNN conversion
 ├── dashboard/
 │   ├── index.html               # Web dashboard UI
 │   ├── app.js                   # Dashboard logic
@@ -236,10 +238,6 @@ AuraBot/
 │       ├── pir.c/h              # PIR motion sensor (GPIO)
 │       ├── speaker.c/h          # Speaker (ES8311 via esp_codec_dev)
 │       └── wifi_connect.c/h     # WiFi STA
-├── vision/
-│   ├── object_detection.py      # YOLO person detection (Pi 5)
-│   ├── setup_model.py           # Model download and NCNN conversion
-│   └── README.md
 ├── presence_sim.sh              # MQTT presence test script
 ├── RASPBERRY_PI_SETUP.md        # Pi 5 audio and environment setup
 ├── requirements.txt
@@ -338,7 +336,7 @@ MQTT_PASSWORD=       # Optional
 ## Platform Support
 
 - **macOS**: Native `say` for TTS
-- **Raspberry Pi 5**: espeak-ng for TTS; `vision/` for YOLO person detection
+- **Raspberry Pi 5**: espeak-ng for TTS; `backend/vision/` for YOLO person detection
 - **Linux/Windows**: pyttsx3 fallback for TTS
 
 ## Troubleshooting
@@ -376,4 +374,4 @@ MQTT_PASSWORD=       # Optional
 ## Documentation
 
 - **[RASPBERRY_PI_SETUP.md](RASPBERRY_PI_SETUP.md)** – Pi 5 audio capture, dependencies, MQTT auth
-- **[vision/README.md](vision/README.md)** – YOLO setup and object detection on Pi 5
+- **[backend/vision/README.md](backend/vision/README.md)** – YOLO setup and object detection on Pi 5

@@ -37,7 +37,7 @@ env/
 # Logs
 logs/
 *.log
-vision/yolo_inference_latency.log
+backend/vision/yolo_inference_latency.log
 backend/logs/voice_pipeline_latency.log
 
 # Output files
@@ -75,7 +75,7 @@ backend/*.pem
 backend/*.key
 
 # ML Models (too large for git - download on Pi5)
-vision/*.pt
-vision/*_ncnn_model/
-vision/*.onnx
-vision/*.engine
+backend/vision/*.pt
+backend/vision/*_ncnn_model/
+backend/vision/*.onnx
+backend/vision/*.engine
