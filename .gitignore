@@ -79,3 +79,4 @@ backend/vision/*.pt
 backend/vision/*_ncnn_model/
 backend/vision/*.onnx
 backend/vision/*.engine
+backend/vision/yolo11n_imx_model
