@@ -1,27 +1,33 @@
-SpeechRecognition==3.14.3
-gTTS>=2.5.0
-# pyttsx3 is optional - not used on Raspberry Pi (uses espeak-ng instead)
-# pyttsx3==2.99
-paho-mqtt==2.1.0
-python-dotenv==1.2.1
+# Core
+python-dotenv>=1.2.0
+paho-mqtt>=2.1.0
 requests>=2.28.0
 
-# Google Gemini SDK for LLM-powered conversation
-google-genai>=1.0.0
-
-# Pin numpy to match system version for picamera2 compatibility
-# System picamera2 was compiled against numpy 1.24.2
-numpy==1.24.2
-
-# PyAudio is required for speech recognition
-# On Raspberry Pi, install system dependencies first:
-#   sudo apt-get update
-#   sudo apt-get install portaudio19-dev python3-pyaudio flac alsa-utils espeak-ng
-
-PyAudio==0.2.14
+# API (dashboard, voice WS)
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+
+# Voice (STT / TTS)
+SpeechRecognition>=3.14.0
+gTTS>=2.5.0
+PyAudio>=0.2.14
 opuslib>=3.0.0
+
+# LLM
+google-genai>=1.0.0
+ollama>=0.6.0
+
+# Vision (YOLO + capture)
 ultralytics>=8.0.0
-# opencv-python-headless pinned to version compatible with numpy 1.24.2 (required for picamera2)
-opencv-python-headless==4.8.1.78
+opencv-python-headless>=4.8.0
+numpy>=1.26.0,<=2.3.5
+
+# Vision – NCNN (optional, for YOLO NCNN models on device)
+ncnn>=1.0.0
+portalocker>=3.0.0
+
+# Vision – Raspberry Pi (optional)
+# On Pi 5: sudo apt install python3-picamera2 (preferred). Or install via pip:
+# picamera2>=0.3.0
+# Sony IMX AI camera (RPi application module):
+# modlib @ git+https://github.com/SonySemiconductorSolutions/aitrios-rpi-application-module-library.git
