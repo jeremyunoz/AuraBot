@@ -258,10 +258,22 @@ def _open_picamera2(args):
     return next_frame, cleanup, fps_getter
 
 
-def _open_opencv(args):
-    """Open camera via OpenCV VideoCapture. Returns (next_frame, cleanup, fps_getter)."""
+def _opencv_candidate_devices(args):
+    """Return ordered OpenCV device candidates, preferring explicit settings first."""
+    if args.device:
+        return [args.device]
+
+    candidates = [args.camera]
+    if args.camera == 0:
+        for path in sorted(glob.glob("/dev/video*")):
+            if path not in candidates:
+                candidates.append(path)
+    return candidates
+
+
+def _make_opencv_capture(device, args):
+    """Create an OpenCV capture triple for one device candidate."""
     api = cv2.CAP_V4L2 if args.v4l2 else cv2.CAP_ANY
-    device = args.device if args.device else args.camera
     cap = cv2.VideoCapture(device, api)
     if args.width:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(args.width))
@@ -286,6 +298,45 @@ def _open_opencv(args):
     return next_frame, cleanup, fps_getter
 
 
+def _open_opencv(args):
+    """Open camera via OpenCV VideoCapture. Returns (next_frame, cleanup, fps_getter)."""
+    last_error = None
+    for device in _opencv_candidate_devices(args):
+        try:
+            next_frame, cleanup, fps_getter = _make_opencv_capture(device, args)
+            first_frame = _probe_stream_frame(next_frame)
+            if first_frame is not None:
+                return _prepend_frame(next_frame, first_frame), cleanup, fps_getter
+            cleanup()
+            last_error = f"no frames from {device}"
+        except Exception as exc:
+            last_error = f"{device}: {exc}"
+
+    raise RuntimeError(last_error or "no OpenCV camera produced frames")
+
+
+def _probe_stream_frame(next_frame, attempts: int = 10, delay_s: float = 0.05):
+    """Try a few reads and return the first valid frame, else None."""
+    for _ in range(attempts):
+        frame = next_frame()
+        if frame is not None:
+            return frame
+        time.sleep(delay_s)
+    return None
+
+
+def _prepend_frame(next_frame, first_frame):
+    """Return a next_frame() wrapper that yields one buffered frame first."""
+    buffered = [first_frame]
+
+    def wrapped():
+        if buffered:
+            return buffered.pop()
+        return next_frame()
+
+    return wrapped
+
+
 def _open_capture(args):
     """
     Open camera based on args.capture. Returns (next_frame, cleanup, fps_getter).
@@ -294,7 +345,16 @@ def _open_capture(args):
     use_picamera2 = args.capture in ("auto", "picamera2")
     if use_picamera2:
         try:
-            return _open_picamera2(args)
+            next_frame, cleanup, fps_getter = _open_picamera2(args)
+            if args.capture == "picamera2":
+                return next_frame, cleanup, fps_getter
+            first_frame = _probe_stream_frame(next_frame)
+            if first_frame is not None:
+                return _prepend_frame(next_frame, first_frame), cleanup, fps_getter
+            try:
+                cleanup()
+            except Exception:
+                pass
         except Exception:
             if args.capture == "picamera2":
                 raise
