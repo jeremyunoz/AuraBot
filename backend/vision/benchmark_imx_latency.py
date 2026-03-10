@@ -22,8 +22,10 @@ try:
     from backend.vision.benchmark_common import (
         BENCHMARK_RUNS_DEFAULT,
         BENCHMARK_WARMUP_DEFAULT,
+        TemperatureTracker,
         add_common_benchmark_args,
         print_stats,
+        print_temperature_stats,
         write_latency_log,
     )
     from backend.vision.object_detection import (
@@ -40,8 +42,10 @@ except ModuleNotFoundError:
     from backend.vision.benchmark_common import (
         BENCHMARK_RUNS_DEFAULT,
         BENCHMARK_WARMUP_DEFAULT,
+        TemperatureTracker,
         add_common_benchmark_args,
         print_stats,
+        print_temperature_stats,
         write_latency_log,
     )
     from backend.vision.object_detection import (
@@ -75,6 +79,7 @@ def _run_imx_latency_benchmark(
     timed_runs: int = BENCHMARK_RUNS_DEFAULT,
     imx_model_dir: str = DEFAULT_IMX_MODEL_DIR,
     frame_rate: int = IMX_OBJECT_DETECTION_FPS,
+    temperature_tracker: TemperatureTracker | None = None,
 ):
     """
     Open IMX pipeline, run warmup frames, then time each frame.
@@ -117,6 +122,8 @@ def _run_imx_latency_benchmark(
                 frame = next(it, None)
                 if frame is None:
                     break
+                if temperature_tracker:
+                    temperature_tracker.sample()
                 if hasattr(frame, "image") and frame.image is not None:
                     h, w = frame.image.shape[:2]
                     frame_size = (w, h)
@@ -128,6 +135,8 @@ def _run_imx_latency_benchmark(
                 if frame is None:
                     break
                 latencies_ms.append((t1 - t0) * 1000.0)
+                if temperature_tracker:
+                    temperature_tracker.sample()
                 if hasattr(frame, "image") and frame.image is not None and frame_size == (0, 0):
                     h, w = frame.image.shape[:2]
                     frame_size = (w, h)
@@ -183,6 +192,8 @@ def main():
         sys.exit(1)
 
     model_path = _resolve_imx_model_path(args.imx_model_dir)
+    temperature_tracker = TemperatureTracker()
+    temperature_tracker.sample()
 
     try:
         latencies_ms, frame_size = _run_imx_latency_benchmark(
@@ -190,10 +201,13 @@ def main():
             timed_runs=args.runs,
             imx_model_dir=args.imx_model_dir,
             frame_rate=args.frame_rate,
+            temperature_tracker=temperature_tracker,
         )
     except Exception as e:
         print(f"Error running benchmark: {e}", file=sys.stderr)
         sys.exit(1)
+    temperature_tracker.sample()
+    temperature_stats = temperature_tracker.summary()
 
     log_path = None
     if args.log_file and args.log_file.lower() != "none":
@@ -214,6 +228,7 @@ def main():
             warmup=args.warmup,
             runs=args.runs,
             source="imx500",
+            temperature_stats=temperature_stats,
         )
 
     if args.quiet:
@@ -230,6 +245,7 @@ def main():
     w, h = frame_size[0], frame_size[1]
     print(f"Results (pipeline={PIPELINE_NAME}, warmup={args.warmup} runs={args.runs} frame={w}x{h}):")
     mean_ms = print_stats(latencies_ms, "Frame (capture + inference)", PIPELINE_NAME)
+    print_temperature_stats(temperature_stats)
     if mean_ms is not None:
         fps = 1000.0 / mean_ms
         print(

@@ -98,7 +98,7 @@ def _send_presence_to_sensor_api(aurabot: Any, person_info: dict) -> None:
             if "libcamera" in err and "v0.6" in err:
                 aurabot.logger.log_general(
                     "IMX camera unavailable (libcamera upgrade required). Using PIR fallback. See backend/vision/IMX_PI_AI_CAMERA_SETUP.md. "
-                    "To use the AI camera, start the backend with LD_LIBRARY_PATH set before Python (e.g. scripts/run_backend_imx.sh).",
+                    "To use the AI camera, start the backend with LD_LIBRARY_PATH and PYTHONPATH set before Python (e.g. scripts/run_backend_imx.sh).",
                     "INFO",
                 )
             else:

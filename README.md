@@ -116,7 +116,7 @@ python object_detection.py --capture auto
 
 ### Run AuraBot with IMX AI Camera
 
-Use the helper launcher so `LD_LIBRARY_PATH` and `MODLIB_LIBCAMERA` are set before Python starts:
+Use the helper launcher so `LD_LIBRARY_PATH`, `PYTHONPATH`, and `MODLIB_LIBCAMERA` are set before Python starts:
 
 ```bash
 ENABLE_VISION=true ./scripts/run_backend_imx.sh

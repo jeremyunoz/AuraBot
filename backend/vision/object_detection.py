@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import sys
 import time
 import threading
 from pathlib import Path
@@ -40,6 +41,12 @@ IMX_OBJECT_DETECTION_FPS = 10
 IMX_PERSON_CONFIDENCE_THRESHOLD = 0.55
 
 # Prefer libcamera from /usr/local (v0.7+) when present so modlib uses it instead of apt's v0.5.
+# Some Pi installs place the newer Python binding under /usr/local/lib/python3/dist-packages,
+# which is not always on sys.path inside project venvs.
+_local_python = "/usr/local/lib/python3/dist-packages"
+if os.path.isdir(_local_python) and _local_python not in sys.path:
+    sys.path.insert(0, _local_python)
+
 # modlib loads /usr/lib's Python libcamera by default, which reports v0.5 and fails the v0.6 check.
 if os.environ.get("MODLIB_LIBCAMERA", "").upper() != "LOCAL":
     os.environ["MODLIB_LIBCAMERA"] = "LOCAL"

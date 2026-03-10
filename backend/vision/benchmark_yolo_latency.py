@@ -24,8 +24,10 @@ try:
         BENCHMARK_FRAME_WIDTH,
         BENCHMARK_RUNS_DEFAULT,
         BENCHMARK_WARMUP_DEFAULT,
+        TemperatureTracker,
         add_common_benchmark_args,
         print_stats,
+        print_temperature_stats,
         write_latency_log,
     )
     from backend.vision.object_detection import (
@@ -42,8 +44,10 @@ except ModuleNotFoundError:
         BENCHMARK_FRAME_WIDTH,
         BENCHMARK_RUNS_DEFAULT,
         BENCHMARK_WARMUP_DEFAULT,
+        TemperatureTracker,
         add_common_benchmark_args,
         print_stats,
+        print_temperature_stats,
         write_latency_log,
     )
     from backend.vision.object_detection import (
@@ -54,8 +58,8 @@ except ModuleNotFoundError:
 
 _VISION_DIR = Path(__file__).resolve().parent
 
-NCNN_MODEL_DIR = "yolo26n_ncnn_model"
-FALLBACK_PT_MODEL = "yolo26n.pt"
+NCNN_MODEL_DIR = "yolo11n_ncnn_model"
+FALLBACK_PT_MODEL = "yolo11n.pt"
 DEFAULT_LATENCY_LOG = "vision_latency.log"
 PIPELINE_NAME = "yolo_cpu"
 
@@ -85,10 +89,18 @@ def _synthetic_frame(width: int, height: int):
     return np.zeros((height, width, 3), dtype=np.uint8)
 
 
-def _run_synthetic_latency_benchmark(model, frame, warmup_runs: int, timed_runs: int) -> list[float]:
+def _run_synthetic_latency_benchmark(
+    model,
+    frame,
+    warmup_runs: int,
+    timed_runs: int,
+    temperature_tracker: TemperatureTracker | None = None,
+) -> list[float]:
     """Measure CPU inference latency using a synthetic frame."""
     for _ in range(warmup_runs):
         model(frame, verbose=False)
+        if temperature_tracker:
+            temperature_tracker.sample()
 
     latencies_ms: list[float] = []
     for _ in range(timed_runs):
@@ -96,6 +108,8 @@ def _run_synthetic_latency_benchmark(model, frame, warmup_runs: int, timed_runs:
         model(frame, verbose=False)
         t1 = time.perf_counter()
         latencies_ms.append((t1 - t0) * 1000.0)
+        if temperature_tracker:
+            temperature_tracker.sample()
     return latencies_ms
 
 
@@ -111,6 +125,7 @@ def _run_camera_latency_benchmark(
     height: int,
     fps: int,
     v4l2: bool,
+    temperature_tracker: TemperatureTracker | None = None,
 ) -> tuple[list[float], tuple[int, int]]:
     """
     Measure end-to-end per-frame latency for the non-IMX path.
@@ -136,6 +151,8 @@ def _run_camera_latency_benchmark(
             if frame is None:
                 break
             model(frame, verbose=False)
+            if temperature_tracker:
+                temperature_tracker.sample()
             if frame_size == (0, 0):
                 h, w = frame.shape[:2]
                 frame_size = (w, h)
@@ -148,6 +165,8 @@ def _run_camera_latency_benchmark(
             model(frame, verbose=False)
             t1 = time.perf_counter()
             latencies_ms.append((t1 - t0) * 1000.0)
+            if temperature_tracker:
+                temperature_tracker.sample()
             if frame_size == (0, 0):
                 h, w = frame.shape[:2]
                 frame_size = (w, h)
@@ -201,6 +220,8 @@ def main():
     args = _parse_args()
 
     model_path, fallback_path = _resolve_model_path(args.model, args.fallback_model)
+    temperature_tracker = TemperatureTracker()
+    temperature_tracker.sample()
 
     try:
         model = _load_yolo_model(model_path, fallback_path)
@@ -221,6 +242,7 @@ def main():
                 height=args.height,
                 fps=args.fps,
                 v4l2=args.v4l2,
+                temperature_tracker=temperature_tracker,
             )
             source = args.capture
             label = "Frame (capture + inference)"
@@ -232,12 +254,15 @@ def main():
                 frame,
                 warmup_runs=args.warmup,
                 timed_runs=args.runs,
+                temperature_tracker=temperature_tracker,
             )
             source = "synthetic"
             label = "Inference"
     except Exception as e:
         print(f"Error running benchmark: {e}", file=sys.stderr)
         sys.exit(1)
+    temperature_tracker.sample()
+    temperature_stats = temperature_tracker.summary()
 
     log_path = None
     if args.log_file and args.log_file.lower() != "none":
@@ -254,6 +279,7 @@ def main():
             warmup=args.warmup,
             runs=args.runs,
             source=source,
+            temperature_stats=temperature_stats,
         )
 
     if args.quiet:
@@ -270,6 +296,7 @@ def main():
     w, h = frame_size
     print(f"Results (pipeline={PIPELINE_NAME}, warmup={args.warmup} runs={args.runs} frame={w}x{h} source={source}):")
     mean_ms = print_stats(latencies_ms, label, PIPELINE_NAME)
+    print_temperature_stats(temperature_stats)
     if mean_ms is not None:
         fps = 1000.0 / mean_ms
         if args.camera:

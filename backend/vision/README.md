@@ -67,7 +67,7 @@ From project root:
 ENABLE_VISION=true ./scripts/run_backend_imx.sh
 ```
 
-This launcher sets `MODLIB_LIBCAMERA=LOCAL` and prepends `/usr/local/lib/aarch64-linux-gnu` to `LD_LIBRARY_PATH` before Python starts, which is required on Pi systems where the IMX runtime must use the newer libcamera build.
+This launcher sets `MODLIB_LIBCAMERA=LOCAL`, prepends `/usr/local/lib/aarch64-linux-gnu` to `LD_LIBRARY_PATH`, and prepends `/usr/local/lib/python3/dist-packages` to `PYTHONPATH` before Python starts. On Pi systems with a newer `/usr/local` libcamera install, both are required so the shared libraries and Python bindings come from the same stack.
 
 Relevant environment variables:
 
@@ -95,3 +95,5 @@ python -m backend.vision.benchmark_yolo_latency --camera --warmup 5 --runs 30
 # Mean ms + FPS only
 python -m backend.vision.benchmark_yolo_latency --quiet
 ```
+
+`benchmark_yolo_latency.py` imports `object_detection.py`, which now prefers `/usr/local/lib/python3/dist-packages` automatically when present so direct benchmark runs pick up the newer Python `libcamera` binding too.
