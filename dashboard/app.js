@@ -17,6 +17,13 @@ const MOVE_ACTIONS = [
     'swing',
 ];
 
+function titleCase(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, char => char.toUpperCase());
+}
+
 // Format time in seconds to human-readable string
 function formatTime(seconds) {
     if (seconds <= 0) return '0 seconds';
@@ -133,10 +140,34 @@ function updateMQTTStatus(connected) {
 }
 
 // Update ESP32 status (online when we received sensor data recently)
-function updateESP32Status(online) {
+function updateESP32Status(online, state) {
     const statusEl = document.getElementById('esp32-status');
-    statusEl.textContent = `ESP32: ${online ? 'Online' : 'Offline'}`;
-    statusEl.className = `status-badge ${online ? 'connected' : 'disconnected'}`;
+    if (!online) {
+        statusEl.textContent = 'ESP32: Offline';
+        statusEl.className = 'status-badge disconnected';
+        return;
+    }
+    const normalizedState = String(state || 'online').toUpperCase();
+    const badgeClass =
+        normalizedState === 'CONNECTING' ? 'connecting' :
+        normalizedState === 'SPEAKING' ? 'speaking' : 'connected';
+    statusEl.textContent = `ESP32: ${titleCase(normalizedState)}`;
+    statusEl.className = `status-badge ${badgeClass}`;
+}
+
+function updateVoiceStatus(voice) {
+    const statusEl = document.getElementById('voice-status');
+    const state = String(voice?.state || 'disconnected').toLowerCase();
+    const label =
+        state === 'listening' ? 'Listening' :
+        state === 'speaking' ? 'Speaking' :
+        state === 'connecting' ? 'Connecting' : 'Offline';
+    const badgeClass =
+        state === 'listening' ? 'connected' :
+        state === 'speaking' ? 'speaking' :
+        state === 'connecting' ? 'connecting' : 'disconnected';
+    statusEl.textContent = `Voice: ${label}`;
+    statusEl.className = `status-badge ${badgeClass}`;
 }
 
 // Update Camera status (online when vision enabled and receiving frames; disabled when vision off)
@@ -167,7 +198,7 @@ function updateMovementControls(data) {
     } else if (!esp32Online) {
         noteEl.textContent = 'ESP32 is offline. Movement controls are disabled.';
     } else {
-        noteEl.textContent = 'Movement controls are enabled only when ESP32 state is ACTIVE.';
+        noteEl.textContent = 'Movement controls are enabled only while ESP32 is listening or speaking.';
     }
 
     MOVE_ACTIONS.forEach(action => {
@@ -189,13 +220,15 @@ async function fetchStatus() {
         updateWellnessConfig(data);
         // Status badges: use explicit checks so missing keys (e.g. old API) still update
         updateMQTTStatus(Boolean(data.mqtt_connected));
-        updateESP32Status(Boolean(data.esp32_online));
+        updateESP32Status(Boolean(data.esp32_online), data.esp32_state);
+        updateVoiceStatus(data.voice || null);
         updateCameraStatus(Boolean(data.camera_online), data.camera_enabled === true);
         updateMovementControls(data);
     } catch (error) {
         console.error('Error fetching status:', error);
         updateMQTTStatus(false);
-        updateESP32Status(false);
+        updateESP32Status(false, null);
+        updateVoiceStatus(null);
         updateCameraStatus(false, false);
         updateMovementControls({
             esp32_state: 'unknown',
@@ -271,7 +304,7 @@ async function sendControl(cmd, params = null) {
 
 async function sendMove(action) {
     if (!movementEnabled) {
-        alert('Movement is only available while ESP32 is ACTIVE and online.');
+        alert('Movement is only available while ESP32 is listening or speaking and online.');
         return;
     }
     await sendControl('move', { action });

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AuraBot Dashboard</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260305b">
+    <link rel="stylesheet" href="/static/styles.css?v=20260311a">
 </head>
 <body>
     <div class="container">
@@ -13,6 +13,7 @@
             <div class="status-indicator">
                 <span id="mqtt-status" class="status-badge status-checking">MQTT: Checking...</span>
                 <span id="esp32-status" class="status-badge status-checking">ESP32: Checking...</span>
+                <span id="voice-status" class="status-badge status-checking">Voice: Checking...</span>
                 <span id="camera-status" class="status-badge status-checking">Camera: Checking...</span>
             </div>
         </header>
@@ -47,7 +48,7 @@
                     <span id="esp32-state" class="value">unknown</span>
                 </div>
                 <p id="movement-note" class="movement-note">
-                    Movement controls are enabled only when ESP32 state is ACTIVE.
+                    Movement controls are enabled only while ESP32 is listening or speaking.
                 </p>
                 <div class="controls movement-controls">
                     <button id="btn-move-stand" class="btn btn-secondary">Stand</button>
@@ -104,6 +105,6 @@
         </main>
     </div>
 
-    <script src="/static/app.js?v=20260305b"></script>
+    <script src="/static/app.js?v=20260311a"></script>
 </body>
 </html>

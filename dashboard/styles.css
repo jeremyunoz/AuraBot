@@ -56,6 +56,16 @@ header h1 {
     color: white;
 }
 
+.status-badge.connecting {
+    background: #2563eb;
+    color: white;
+}
+
+.status-badge.speaking {
+    background: #f59e0b;
+    color: white;
+}
+
 .status-badge.unknown,
 .status-badge.status-checking {
     background: #6b7280;
@@ -114,6 +124,18 @@ main {
 
 .state-active {
     color: #10b981;
+}
+
+.state-connecting {
+    color: #2563eb;
+}
+
+.state-listening {
+    color: #10b981;
+}
+
+.state-speaking {
+    color: #f59e0b;
 }
 
 .state-paused {
