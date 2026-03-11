@@ -14,7 +14,11 @@
 
 static const char *TAG = "voice_ws";
 
-#define HELLO_TIMEOUT_MS 10000
+#ifdef CONFIG_VOICE_WS_NETWORK_TIMEOUT_MS
+#define VOICE_WS_NETWORK_TIMEOUT_MS CONFIG_VOICE_WS_NETWORK_TIMEOUT_MS
+#else
+#define VOICE_WS_NETWORK_TIMEOUT_MS 45000
+#endif
 
 static const char HELLO_JSON[] =
     "{\"type\":\"hello\",\"version\":1,\"transport\":\"websocket\","
@@ -113,7 +117,7 @@ esp_err_t voice_ws_start(const char *uri)
         .task_prio = 6,
         .task_stack = 4096,
         .disable_auto_reconnect = true,
-        .network_timeout_ms = HELLO_TIMEOUT_MS,
+        .network_timeout_ms = VOICE_WS_NETWORK_TIMEOUT_MS,
     };
 
     s_ws_client = esp_websocket_client_init(&ws_cfg);

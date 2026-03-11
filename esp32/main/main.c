@@ -37,7 +37,6 @@ typedef enum {
 
 #define STATE_TASK_STACK_SIZE    4096
 #define USONIC_TASK_STACK_SIZE   3072
-#define STATUS_TASK_STACK_SIZE   2048
 #define EVT_QUEUE_LEN            10
 #define STATUS_PUBLISH_PERIOD_MS 30000
 
@@ -207,9 +206,11 @@ static void state_task(void *arg)
 {
     (void)arg;
     sys_event_t evt;
+    const TickType_t status_period_ticks = pdMS_TO_TICKS(STATUS_PUBLISH_PERIOD_MS);
 
     while (1) {
-        if (xQueueReceive(s_evt_queue, &evt, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_evt_queue, &evt, status_period_ticks) != pdTRUE) {
+            publish_state((sys_state_t)s_state);
             continue;
         }
 
@@ -236,15 +237,6 @@ static void state_task(void *arg)
         default:
             break;
         }
-    }
-}
-
-static void status_publish_task(void *arg)
-{
-    (void)arg;
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(STATUS_PUBLISH_PERIOD_MS));
-        publish_state((sys_state_t)s_state);
     }
 }
 
@@ -313,7 +305,6 @@ void app_main(void)
     set_state(SYS_STATE_IDLE);
 
     xTaskCreate(state_task, "state_task", STATE_TASK_STACK_SIZE, NULL, 6, NULL);
-    xTaskCreate(status_publish_task, "status_task", STATUS_TASK_STACK_SIZE, NULL, 4, NULL);
     xTaskCreate(usonic_task, "usonic_task", USONIC_TASK_STACK_SIZE, NULL, 5, NULL);
 
     while (1) {

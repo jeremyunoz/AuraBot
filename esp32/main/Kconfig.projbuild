@@ -155,6 +155,16 @@ menu "AuraBot Configuration"
                 URI for the Pi5 WebSocket voice server (e.g. ws://host:port/path).
                 Using pi5.local requires mDNS resolution and can add 1-3+ seconds to
                 connect. For faster connect use the Pi's IP: ws://192.168.x.x:8765/voice.
+
+        config VOICE_WS_NETWORK_TIMEOUT_MS
+            int "Voice WebSocket network timeout (ms)"
+            depends on VOICE_SESSION_ENABLE
+            default 45000
+            range 5000 120000
+            help
+                Idle network timeout for the ESP32 WebSocket client while waiting for
+                the Pi5 to finish STT/LLM/TTS work. Increase this if online TTS takes
+                longer than 10 seconds and the connection drops before audio arrives.
     endmenu
 
 endmenu
