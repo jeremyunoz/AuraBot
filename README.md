@@ -177,6 +177,7 @@ When voice capture is on the ESP32 (not the Pi), the Pi runs a WebSocket voice s
    - `idf.py menuconfig` → **AuraBot Configuration** → **Voice session (online TTS / Pi5 WebSocket)**:
      - **Enable voice session (Opus + WebSocket to Pi5)** = Yes
      - **WebSocket URI for Pi5 voice server** = `ws://pi5.local:8765/voice` (or your Pi5 hostname/IP)
+     - **Voice WebSocket network timeout (ms)** = keep this above your worst-case Pi STT/LLM/TTS latency; `45000` is a safer default for gTTS than `10000`
    - Or in `esp32/sdkconfig.defaults`: set `CONFIG_VOICE_SESSION_ENABLE=y` and `CONFIG_VOICE_WS_URI="ws://<host>:8765/voice"`.
 
 4. **Test**: Put the device in ACTIVE state (e.g. wake + start session). ESP32 connects, gets server hello and the greeting TTS, then streams mic Opus. Pi runs ASR → LLM/timers → TTS Opus back to ESP32.
