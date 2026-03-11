@@ -13,6 +13,7 @@ When integrated with AuraBot (app.state.aurabot set), transcripts are passed to 
 Matches the protocol in esp32/main/voice_session.c:
 - ESP32 connects to ws://<host>:8765/voice
 - Client sends text hello; server replies with {"type":"hello",...}
+- Server sends {"type":"ready","phase":"listen"} only after STT/TTS init is complete.
 - ESP32 sends binary Opus frames (60 ms, 16 kHz mono) only in LISTEN phase.
 - Alternation (no congestion): LISTEN = ESP32 sends mic, ignores TTS; SPEAK = ESP32 plays TTS, does not send mic.
 - Server sends {"type":"tts_start"} before each TTS burst, then binary Opus frames, then {"type":"tts_end"}.
@@ -85,6 +86,7 @@ else:
         )
 # Gentle gain for TTS PCM (1.0 = no change). Slightly < 1 reduces sharp/harsh output.
 TTS_PCM_GAIN = float(os.environ.get("VOICE_TTS_PCM_GAIN", "0.90"))
+VOICE_WS_GREETING_ON_CONNECT = os.environ.get("VOICE_WS_GREETING_ON_CONNECT", "false").lower() in ("1", "true", "yes")
 # Optional: log per-turn pipeline latency. Set to "1" or path to enable (default: backend/logs/voice_pipeline_latency.log).
 # Read this at runtime (not import time) so .env load order cannot disable logging accidentally.
 def _get_voice_latency_log_setting() -> str:
@@ -139,6 +141,10 @@ HELLO_RESPONSE = {
 
 # Phase control for ESP32 listen/speak alternation (voice_session.c):
 # tts_start → ESP32 enters SPEAK (stops sending mic, plays TTS); tts_end → back to LISTEN.
+def _build_ready_msg(phase: str = "listen") -> str:
+    return json.dumps({"type": "ready", "phase": phase})
+
+
 TTS_START_MSG = json.dumps({"type": "tts_start"})
 TTS_END_MSG = json.dumps({"type": "tts_end"})
 
@@ -146,7 +152,12 @@ TTS_END_MSG = json.dumps({"type": "tts_end"})
 _executor = ThreadPoolExecutor(max_workers=2)
 
 # Voice WebSocket connection state and TTS text queue (for timer/wellness → online TTS)
-_voice_client_connected = False
+_voice_client_state = {
+    "connected": False,
+    "ready": False,
+    "phase": "disconnected",
+    "updated_at": None,
+}
 _voice_client_connected_lock = threading.Lock()
 _pending_text_tts_queue = None
 
@@ -162,7 +173,44 @@ def _get_pending_text_tts_queue():
 def is_voice_client_connected() -> bool:
     """True when an ESP32 is connected via the voice WebSocket."""
     with _voice_client_connected_lock:
-        return _voice_client_connected
+        return bool(_voice_client_state["connected"])
+
+
+def _derive_voice_client_state(snapshot: dict) -> str:
+    if not snapshot.get("connected"):
+        return "disconnected"
+    if not snapshot.get("ready"):
+        return "connecting"
+    phase = str(snapshot.get("phase") or "listen").lower()
+    if phase == "speak":
+        return "speaking"
+    return "listening"
+
+
+def get_voice_client_status() -> dict:
+    """Return a snapshot of the current voice WebSocket session state."""
+    with _voice_client_connected_lock:
+        snapshot = dict(_voice_client_state)
+    updated_at = snapshot.get("updated_at")
+    snapshot["state"] = _derive_voice_client_state(snapshot)
+    snapshot["age_seconds"] = None if updated_at is None else max(0.0, time.time() - updated_at)
+    return snapshot
+
+
+def _set_voice_client_state(*, connected=None, ready=None, phase=None) -> None:
+    with _voice_client_connected_lock:
+        if connected is not None:
+            _voice_client_state["connected"] = bool(connected)
+        if ready is not None:
+            _voice_client_state["ready"] = bool(ready)
+        if phase is not None:
+            _voice_client_state["phase"] = phase
+        if not _voice_client_state["connected"]:
+            _voice_client_state["ready"] = False
+            _voice_client_state["phase"] = "disconnected"
+        elif not _voice_client_state["ready"] and phase is None:
+            _voice_client_state["phase"] = "connecting"
+        _voice_client_state["updated_at"] = time.time()
 
 
 def enqueue_tts_text(text: str) -> bool:
@@ -170,7 +218,7 @@ def enqueue_tts_text(text: str) -> bool:
     if not text or not text.strip():
         return False
     with _voice_client_connected_lock:
-        if not _voice_client_connected:
+        if not _voice_client_state["connected"]:
             return False
     _get_pending_text_tts_queue().put_nowait(text)
     return True
@@ -264,11 +312,15 @@ async def voice_websocket(websocket: WebSocket):
     pcm_buffer = bytearray()
     loop = asyncio.get_event_loop()
     app = getattr(websocket, "app", None) or websocket.scope.get("app")
+    bot = getattr(app.state, "aurabot", None) if app else None
 
     if not _OPUS_AVAILABLE:
         logger.error("opuslib not available; cannot decode/encode Opus")
         await websocket.close(code=1011, reason="Opus not available")
+        _set_voice_client_state(connected=False, ready=False, phase="disconnected")
         return
+
+    _set_voice_client_state(connected=True, ready=False, phase="connecting")
 
     # Client hello first — reply immediately so ESP32 sees "connected" faster.
     # Defer heavy init (decoder, encoder, recognizer) until after hello.
@@ -285,31 +337,21 @@ async def voice_websocket(websocket: WebSocket):
     stt = STT()
     tts_engine = TTS()
 
-    # Optional: send greeting when integrated with AuraBot (voice capture on ESP32)
-    bot = getattr(app.state, "aurabot", None) if app else None
-    if bot is not None and getattr(bot, "greeting", None):
-        def do_greeting_tts():
-            pcm = tts_engine.synthesize_pcm(bot.greeting)
-            return _pcm_to_opus_frames(pcm)
-        try:
-            opus_frames = await loop.run_in_executor(_executor, do_greeting_tts)
-            if opus_frames:
-                await websocket.send_text(TTS_START_MSG)
-                await _send_tts_frames(websocket, opus_frames)
-                await websocket.send_text(TTS_END_MSG)
-        except Exception as e:
-            logger.debug("Greeting TTS send: %s", e)
-
     # Queue for TTS: main loop enqueues; drain task sends tts_start + frames + tts_end
     pending_tts_queue = asyncio.Queue()
     drain_task = None
     drain_text_task = None
     exit_requested = False
+    greeting_frames = []
 
-    def set_voice_connected(connected: bool):
-        global _voice_client_connected
-        with _voice_client_connected_lock:
-            _voice_client_connected = connected
+    async def send_tts_batch(frames: list):
+        if not frames:
+            return
+        await websocket.send_text(TTS_START_MSG)
+        _set_voice_client_state(phase="speak")
+        await _send_tts_frames(websocket, frames)
+        await websocket.send_text(TTS_END_MSG)
+        _set_voice_client_state(phase="listen")
 
     async def drain_tts_queue():
         """Background task: send queued TTS Opus frames to ESP32.
@@ -321,15 +363,7 @@ async def voice_websocket(websocket: WebSocket):
                 if not frames:
                     continue
                 try:
-                    await websocket.send_text(TTS_START_MSG)
-                except Exception:
-                    return
-                try:
-                    await _send_tts_frames(websocket, frames)
-                except Exception:
-                    return
-                try:
-                    await websocket.send_text(TTS_END_MSG)
+                    await send_tts_batch(frames)
                 except Exception:
                     return
             except asyncio.CancelledError:
@@ -361,9 +395,21 @@ async def voice_websocket(websocket: WebSocket):
                 logger.debug("drain_text_tts_queue: %s", e)
 
     try:
-        set_voice_connected(True)
+        if VOICE_WS_GREETING_ON_CONNECT and bot is not None and getattr(bot, "greeting", None):
+            def do_greeting_tts():
+                pcm = tts_engine.synthesize_pcm(bot.greeting)
+                return _pcm_to_opus_frames(pcm)
+            greeting_frames = await loop.run_in_executor(_executor, do_greeting_tts)
+
+        ready_phase = "speak" if greeting_frames else "listen"
+        await websocket.send_text(_build_ready_msg(ready_phase))
+        _set_voice_client_state(connected=True, ready=True, phase=ready_phase)
+
         drain_task = asyncio.create_task(drain_tts_queue())
         drain_text_task = asyncio.create_task(drain_text_tts_queue())
+
+        if greeting_frames:
+            await send_tts_batch(greeting_frames)
 
         while True:
             data = await websocket.receive_bytes()
@@ -414,9 +460,7 @@ async def voice_websocket(websocket: WebSocket):
                             return _pcm_to_opus_frames(pcm)
                         opus_frames = await loop.run_in_executor(_executor, do_exit_tts)
                         if opus_frames:
-                            await websocket.send_text(TTS_START_MSG)
-                            await _send_tts_frames(websocket, opus_frames)
-                            await websocket.send_text(TTS_END_MSG)
+                            await send_tts_batch(opus_frames)
                         break
                 else:
                     t2 = time.perf_counter()
@@ -448,7 +492,7 @@ async def voice_websocket(websocket: WebSocket):
     except Exception as e:
         logger.exception("Voice WS: error after %d frames: %s", frame_count, e)
     finally:
-        set_voice_connected(False)
+        _set_voice_client_state(connected=False, ready=False, phase="disconnected")
         if drain_text_task is not None:
             drain_text_task.cancel()
             try:

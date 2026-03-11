@@ -450,9 +450,9 @@ class MQTTAPI:
 
     def is_esp32_user_control_enabled(self) -> bool:
         """
-        User movement commands are enabled on ESP32 only while state is ACTIVE.
+        User movement commands are enabled on ESP32 only while the voice session is live.
         """
-        return self.is_esp32_online() and self.get_esp32_state() == "ACTIVE"
+        return self.is_esp32_online() and self.get_esp32_state() in {"LISTENING", "SPEAKING"}
     
     def _start_timeout_monitoring(self):
         """Start background thread to monitor sensor data timeout and auto-pause."""

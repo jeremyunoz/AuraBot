@@ -128,6 +128,18 @@ def _build_status(bot) -> dict:
         out["esp32_state"] = None
         out["esp32_user_control_enabled"] = False
 
+    try:
+        from backend.voice.voice_ws_server import get_voice_client_status
+        out["voice"] = get_voice_client_status()
+    except Exception:
+        out["voice"] = {
+            "connected": False,
+            "ready": False,
+            "phase": "disconnected",
+            "state": "disconnected",
+            "age_seconds": None,
+        }
+
     # Camera: online if vision enabled and frames received recently (within 60s)
     camera_enabled = getattr(bot, "_enable_vision", False)
     out["camera_enabled"] = camera_enabled

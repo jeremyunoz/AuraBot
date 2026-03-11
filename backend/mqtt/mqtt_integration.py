@@ -173,7 +173,14 @@ class MQTTIntegration:
                             state = state_val.strip().upper()
                         else:
                             state = None
-                    state_looks_esp32 = state in {"IDLE", "WAKING", "ACTIVE", "SLEEPING"}
+                    state_looks_esp32 = state in {
+                        "IDLE",
+                        "WAKING",
+                        "CONNECTING",
+                        "LISTENING",
+                        "SPEAKING",
+                        "SLEEPING",
+                    }
                     is_esp32_status = (
                         "esp32" in msg.topic
                         or (isinstance(data, dict) and (
