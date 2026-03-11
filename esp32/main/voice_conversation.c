@@ -68,6 +68,7 @@ static const char TURN_END_MSG[] = "{\"type\":\"turn_end\",\"source\":\"vad\"}";
 #define PLAYBACK_TASK_PRIO      6
 #define DECODER_TASK_STACK      12288
 #define DECODER_TASK_PRIO       6
+#define DECODER_IDLE_TIMEOUT_MS 750
 #define IDLE_POLL_MS            20
 #define ENCODER_RECV_TICKS      pdMS_TO_TICKS(FRAME_MS)
 #define ENCODER_SEND_TICKS      pdMS_TO_TICKS(80)
@@ -280,8 +281,12 @@ static void decoder_task(void *arg)
     opus_packet_t item;
 
     while (1) {
-        BaseType_t got = xQueueReceive(s_decoder_queue, &item, pdMS_TO_TICKS(200));
+        BaseType_t got = xQueueReceive(s_decoder_queue, &item, pdMS_TO_TICKS(DECODER_IDLE_TIMEOUT_MS));
         if (got != pdTRUE) {
+            if (s_phase == VOICE_PHASE_SPEAK &&
+                (!s_playback_stream || xStreamBufferBytesAvailable(s_playback_stream) == 0)) {
+                set_phase(VOICE_PHASE_LISTEN, "decoder_idle");
+            }
             continue;
         }
         if (!s_opus_dec || !s_playback_stream || item.len == 0) continue;

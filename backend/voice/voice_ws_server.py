@@ -385,13 +385,40 @@ async def voice_websocket(websocket: WebSocket):
             buffered_ms=snapshot["buffered_ms"],
         )
 
+    def can_dispatch_external_tts() -> bool:
+        status = get_voice_client_status()
+        return (
+            bool(status.get("connected"))
+            and bool(status.get("ready"))
+            and str(status.get("phase") or "").lower() == "listen"
+            and turn_assembler.turn_state == "idle"
+            and pending_tts_queue.empty()
+        )
+
     async def send_tts_batch(frames: list):
         if not frames:
             return
-        await websocket.send_text(TTS_START_MSG)
-        _set_voice_client_state(phase="speak", turn_state="replying", buffered_ms=0)
-        await _send_tts_frames(websocket, frames)
-        await websocket.send_text(TTS_END_MSG)
+        tts_started = False
+        try:
+            await websocket.send_text(TTS_START_MSG)
+            tts_started = True
+            _set_voice_client_state(phase="speak", turn_state="replying", buffered_ms=0)
+            await _send_tts_frames(websocket, frames)
+            await websocket.send_text(TTS_END_MSG)
+        except Exception:
+            if tts_started:
+                try:
+                    await websocket.send_text(TTS_END_MSG)
+                except Exception:
+                    logger.debug("Voice WS: failed to send tts_end during recovery")
+                _set_voice_client_state(phase="listen")
+                publish_turn_snapshot()
+            try:
+                await websocket.close(code=1011, reason="tts_send_failed")
+            except Exception:
+                pass
+            raise
+
         _set_voice_client_state(phase="listen")
         publish_turn_snapshot()
 
@@ -406,7 +433,8 @@ async def voice_websocket(websocket: WebSocket):
                     continue
                 try:
                     await send_tts_batch(frames)
-                except Exception:
+                except Exception as e:
+                    logger.warning("drain_tts_queue: stopping after TTS send failure: %s", e)
                     return
             except asyncio.CancelledError:
                 return
@@ -416,25 +444,49 @@ async def voice_websocket(websocket: WebSocket):
     async def drain_text_tts_queue():
         """Drain thread-safe text TTS queue (timer/wellness): online TTS → Opus → pending_tts_queue."""
         text_queue = _get_pending_text_tts_queue()
-        while True:
-            try:
-                try:
-                    text = text_queue.get_nowait()
-                except queue.Empty:
-                    text = None
-                if not text:
-                    await asyncio.sleep(0.2)
+        pending_text = None
+        pending_frames = None
+
+        try:
+            while True:
+                if pending_frames is None:
+                    if not can_dispatch_external_tts():
+                        await asyncio.sleep(0.1)
+                        continue
+                    try:
+                        pending_text = text_queue.get_nowait()
+                    except queue.Empty:
+                        await asyncio.sleep(0.2)
+                        continue
+                    if not pending_text or not pending_text.strip():
+                        pending_text = None
+                        continue
+
+                    def do_online_tts():
+                        pcm = tts_engine.synthesize_pcm(pending_text)
+                        return _pcm_to_opus_frames(pcm) if pcm else []
+
+                    pending_frames = await loop.run_in_executor(_executor, do_online_tts)
+                    if not pending_frames:
+                        pending_text = None
+                        pending_frames = None
+                        continue
+
+                if not can_dispatch_external_tts():
+                    await asyncio.sleep(0.1)
                     continue
-                def do_online_tts():
-                    pcm = tts_engine.synthesize_pcm(text)
-                    return _pcm_to_opus_frames(pcm) if pcm else []
-                opus_frames = await loop.run_in_executor(_executor, do_online_tts)
-                if opus_frames:
-                    pending_tts_queue.put_nowait(opus_frames)
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                logger.debug("drain_text_tts_queue: %s", e)
+
+                pending_tts_queue.put_nowait(pending_frames)
+                pending_text = None
+                pending_frames = None
+        except asyncio.CancelledError:
+            if pending_text:
+                text_queue.put_nowait(pending_text)
+            return
+        except Exception as e:
+            if pending_text:
+                text_queue.put_nowait(pending_text)
+            logger.debug("drain_text_tts_queue: %s", e)
 
     async def process_user_turn(flush) -> bool:
         nonlocal exit_requested

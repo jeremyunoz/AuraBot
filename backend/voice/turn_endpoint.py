@@ -29,7 +29,7 @@ class VoiceTurnAssembler:
         *,
         sample_rate: int = 16000,
         sample_width: int = 2,
-        min_turn_ms: int = 500,
+        min_turn_ms: int = 150,
         idle_commit_ms: int = 850,
         stalled_speech_ms: int = 1100,
         max_turn_ms: int = 12000,
@@ -97,7 +97,7 @@ class VoiceTurnAssembler:
         self._buffer.extend(pcm_bytes)
 
         if len(self._buffer) >= self._max_turn_bytes:
-            return self._flush("max_turn")
+            return self._flush("max_turn", allow_short=True)
         return None
 
     def note_vad(self, state: str) -> TurnFlush | None:
@@ -116,7 +116,7 @@ class VoiceTurnAssembler:
 
     def commit_turn(self, reason: str = "turn_end") -> TurnFlush | None:
         self._speech_active = False
-        return self._flush(reason)
+        return self._flush(reason, allow_short=True)
 
     def maybe_flush_timeout(self) -> TurnFlush | None:
         if not self._buffer:
@@ -133,7 +133,7 @@ class VoiceTurnAssembler:
             return self._flush("idle_timeout")
         return None
 
-    def _flush(self, reason: str) -> TurnFlush | None:
+    def _flush(self, reason: str, *, allow_short: bool = False) -> TurnFlush | None:
         if not self._buffer:
             return None
 
@@ -144,7 +144,7 @@ class VoiceTurnAssembler:
         self._turn_started_at = None
         self._last_audio_at = None
 
-        if len(pcm) < self._min_turn_bytes:
+        if not allow_short and len(pcm) < self._min_turn_bytes:
             return None
 
         return TurnFlush(pcm=pcm, reason=reason, duration_ms=duration_ms)
