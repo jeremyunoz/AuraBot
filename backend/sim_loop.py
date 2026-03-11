@@ -305,13 +305,6 @@ class AuraBot:
         """Start MQTT and vision only (no Pi mic / no conversation loop). Use when voice input is from ESP32 via WebSocket."""
         self._is_running = True
 
-        if self.mqtt_integration:
-            try:
-                self.mqtt_integration.start()
-                self.logger.log_mqtt("MQTT integration enabled - sensor data will trigger wellness timers", "INFO")
-            except Exception as e:
-                self.logger.log_error(f"MQTT integration failed to start: {e}")
-
         # Start local PIR GPIO integration if enabled; feeds motion into local sensor API.
         if self._enable_pir_gpio and self.mqtt_api:
             try:
@@ -327,7 +320,8 @@ class AuraBot:
                     warmup_seconds=self._pir_warmup_seconds,
                 )
                 if self._pir_ready_event:
-                    self._pir_ready_event.wait(timeout=3.0)
+                    # PIR warm-up runs in the background; do not block overall startup.
+                    self._pir_ready_event.wait(timeout=0.1)
             except Exception as e:
                 self.logger.log_error(f"PIR GPIO integration failed to start: {e}")
         elif self._enable_pir_gpio:
@@ -355,6 +349,14 @@ class AuraBot:
                         self.logger.log_general("Vision initialization timeout - continuing anyway", "WARNING")
             except Exception as e:
                 self.logger.log_error(f"Vision integration failed to start: {e}")
+
+        # Start MQTT transport after hardware (vision, PIR) threads are initialized.
+        if self.mqtt_integration:
+            try:
+                self.mqtt_integration.start()
+                self.logger.log_mqtt("MQTT integration enabled - sensor data will trigger wellness timers", "INFO")
+            except Exception as e:
+                self.logger.log_error(f"MQTT integration failed to start: {e}")
 
     def _speak_safely(self, message: str):
         """
