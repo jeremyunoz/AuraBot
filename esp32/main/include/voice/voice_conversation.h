@@ -66,15 +66,31 @@ void voice_conversation_push_pcm(const int16_t *pcm, size_t samples);
 /** True when session is active */
 bool voice_conversation_is_active(void);
 
+/** True when the conversation layer can currently accept mic PCM (CONNECTING or LISTEN). */
+bool voice_conversation_capture_enabled(void);
+
 /** Start conversation: create tasks/buffers/Opus, register with voice_ws, start WS */
 esp_err_t voice_conversation_start(const char *uri);
 
 /** Stop conversation: stop WS, destroy Opus and tasks */
 void voice_conversation_stop(void);
 
-/** Callback when session ends (e.g. WebSocket disconnected). Called from WS task context. */
-typedef void (*voice_conversation_session_end_cb_t)(void *arg);
-void voice_conversation_set_session_end_callback(voice_conversation_session_end_cb_t cb, void *arg);
+/** Notify the backend of local speech/silence transitions when remote LISTEN is active. */
+void voice_conversation_notify_vad(bool speaking);
+
+/** Commit the current user turn to the backend (used after VAD returns to silence). */
+void voice_conversation_commit_turn(void);
+
+typedef enum {
+    VOICE_CONVERSATION_EVENT_BACKEND_READY = 0,
+    VOICE_CONVERSATION_EVENT_LISTENING,
+    VOICE_CONVERSATION_EVENT_SPEAKING,
+    VOICE_CONVERSATION_EVENT_SESSION_ENDED,
+} voice_conversation_event_t;
+
+/** Callback for conversation lifecycle updates. Called from WS task context. */
+typedef void (*voice_conversation_event_cb_t)(voice_conversation_event_t event, void *arg);
+void voice_conversation_set_event_callback(voice_conversation_event_cb_t cb, void *arg);
 
 #ifdef __cplusplus
 }

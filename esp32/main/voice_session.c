@@ -19,12 +19,34 @@
 static const char *TAG = "voice_session";
 static QueueHandle_t s_evt_queue = NULL;
 
-static void on_session_end(void *arg)
+static void post_system_event(sys_event_id_t id)
+{
+    if (s_evt_queue) {
+        sys_event_t evt = { .id = id };
+        (void)xQueueSend(s_evt_queue, &evt, pdMS_TO_TICKS(10));
+    }
+}
+
+static void on_conversation_event(voice_conversation_event_t event, void *arg)
 {
     (void)arg;
-    if (s_evt_queue) {
-        sys_event_t evt = { .id = SYS_EVT_SESSION_END };
-        (void)xQueueSend(s_evt_queue, &evt, 0);
+
+    switch (event) {
+    case VOICE_CONVERSATION_EVENT_BACKEND_READY:
+        post_system_event(SYS_EVT_PI5_READY);
+        break;
+    case VOICE_CONVERSATION_EVENT_LISTENING:
+        post_system_event(SYS_EVT_VOICE_LISTENING);
+        break;
+    case VOICE_CONVERSATION_EVENT_SPEAKING:
+        post_system_event(SYS_EVT_VOICE_SPEAKING);
+        break;
+    case VOICE_CONVERSATION_EVENT_SESSION_ENDED:
+        post_system_event(SYS_EVT_SESSION_END);
+        break;
+    default:
+        ESP_LOGW(TAG, "Unhandled conversation event %d", (int)event);
+        break;
     }
 }
 
@@ -43,6 +65,21 @@ bool voice_session_is_active(void)
     return voice_conversation_is_active();
 }
 
+bool voice_session_capture_enabled(void)
+{
+    return voice_conversation_capture_enabled();
+}
+
+void voice_session_notify_vad(bool speaking)
+{
+    voice_conversation_notify_vad(speaking);
+}
+
+void voice_session_commit_turn(void)
+{
+    voice_conversation_commit_turn();
+}
+
 esp_err_t voice_session_start(void)
 {
     const char *uri = CONFIG_VOICE_WS_URI;
@@ -50,7 +87,7 @@ esp_err_t voice_session_start(void)
         ESP_LOGE(TAG, "CONFIG_VOICE_WS_URI not set");
         return ESP_ERR_INVALID_ARG;
     }
-    voice_conversation_set_session_end_callback(on_session_end, NULL);
+    voice_conversation_set_event_callback(on_conversation_event, NULL);
     return voice_conversation_start(uri);
 }
 
@@ -70,6 +107,20 @@ void voice_session_push_pcm(const int16_t *pcm, size_t samples)
 bool voice_session_is_active(void)
 {
     return false;
+}
+
+bool voice_session_capture_enabled(void)
+{
+    return false;
+}
+
+void voice_session_notify_vad(bool speaking)
+{
+    (void)speaking;
+}
+
+void voice_session_commit_turn(void)
+{
 }
 
 esp_err_t voice_session_start(void)

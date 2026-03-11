@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdbool.h>
 
 #include "sdkconfig.h"
 #include "esp_err.h"
@@ -31,19 +32,26 @@ static const char *TAG = "main";
 typedef enum {
     SYS_STATE_IDLE = 0,
     SYS_STATE_WAKING,
-    SYS_STATE_ACTIVE,
+    SYS_STATE_CONNECTING,
+    SYS_STATE_LISTENING,
+    SYS_STATE_SPEAKING,
     SYS_STATE_SLEEPING
 } sys_state_t;
 
 #define STATE_TASK_STACK_SIZE    4096
 #define USONIC_TASK_STACK_SIZE   3072
-#define EVT_QUEUE_LEN            10
+#define EVT_QUEUE_LEN            24
 #define STATUS_PUBLISH_PERIOD_MS 30000
 
 static QueueHandle_t s_evt_queue = NULL;
 static volatile sys_state_t s_state = SYS_STATE_IDLE;
 static TickType_t  s_active_since = 0;
 #define MIN_ACTIVE_FOR_SLEEP_MS  5000
+
+static bool state_is_voice_live(sys_state_t state)
+{
+    return state == SYS_STATE_LISTENING || state == SYS_STATE_SPEAKING;
+}
 
 static const char *state_to_str(sys_state_t state)
 {
@@ -52,8 +60,12 @@ static const char *state_to_str(sys_state_t state)
         return "IDLE";
     case SYS_STATE_WAKING:
         return "WAKING";
-    case SYS_STATE_ACTIVE:
-        return "ACTIVE";
+    case SYS_STATE_CONNECTING:
+        return "CONNECTING";
+    case SYS_STATE_LISTENING:
+        return "LISTENING";
+    case SYS_STATE_SPEAKING:
+        return "SPEAKING";
     case SYS_STATE_SLEEPING:
         return "SLEEPING";
     default:
@@ -64,7 +76,21 @@ static const char *state_to_str(sys_state_t state)
 static void publish_state(sys_state_t state)
 {
     char msg[128];
-    snprintf(msg, sizeof(msg), "{\"src\":\"esp32\",\"state\":\"%s\"}", state_to_str(state));
+    const bool voice_ready = state_is_voice_live(state);
+    const char *phase =
+        (state == SYS_STATE_CONNECTING) ? "connecting" :
+        (state == SYS_STATE_LISTENING) ? "listen" :
+        (state == SYS_STATE_SPEAKING) ? "speak" :
+        (state == SYS_STATE_WAKING) ? "waking" :
+        (state == SYS_STATE_SLEEPING) ? "sleeping" : "idle";
+    snprintf(
+        msg,
+        sizeof(msg),
+        "{\"src\":\"esp32\",\"state\":\"%s\",\"voice_phase\":\"%s\",\"voice_ready\":%s}",
+        state_to_str(state),
+        phase,
+        voice_ready ? "true" : "false"
+    );
     (void)mqtt_publish("aurabot/status", msg, 1, 1);
 }
 
@@ -72,7 +98,9 @@ static roboeyes_state_t sys_to_eye_state(sys_state_t s)
 {
     switch (s) {
     case SYS_STATE_WAKING:   return EYE_STATE_WAKING;
-    case SYS_STATE_ACTIVE:   return EYE_STATE_ACTIVE;
+    case SYS_STATE_CONNECTING:
+    case SYS_STATE_LISTENING:
+    case SYS_STATE_SPEAKING: return EYE_STATE_ACTIVE;
     case SYS_STATE_SLEEPING: return EYE_STATE_SLEEPING;
     default:                 return EYE_STATE_IDLE;
     }
@@ -83,7 +111,9 @@ static action_id_t sys_to_action(sys_state_t s)
     switch (s) {
     case SYS_STATE_IDLE:     return ACTION_SIT;
     case SYS_STATE_WAKING:   return ACTION_WAVE;
-    case SYS_STATE_ACTIVE:   return ACTION_STAND;
+    case SYS_STATE_CONNECTING:
+    case SYS_STATE_LISTENING:
+    case SYS_STATE_SPEAKING: return ACTION_STAND;
     case SYS_STATE_SLEEPING: return ACTION_LAY_DOWN;
     default:                 return ACTION_SIT;
     }
@@ -91,13 +121,14 @@ static action_id_t sys_to_action(sys_state_t s)
 
 static void set_state(sys_state_t state)
 {
+    sys_state_t prev_state = (sys_state_t)s_state;
     s_state = state;
-    if (state == SYS_STATE_ACTIVE) {
+    if (state_is_voice_live(state) && !state_is_voice_live(prev_state)) {
         s_active_since = xTaskGetTickCount();
     }
     roboeyes_set_state(sys_to_eye_state(state));
     action_post(sys_to_action(state));
-    action_set_user_control(state == SYS_STATE_ACTIVE);
+    action_set_user_control(state_is_voice_live(state));
     publish_state(state);
     ESP_LOGI(TAG, "State -> %s", state_to_str(state));
 }
@@ -194,12 +225,28 @@ static void enter_waking(void)
         enter_error_idle();
         return;
     }
-    ESP_LOGI(TAG, "voice_session_start done, going ACTIVE");
+    ESP_LOGI(TAG, "voice_session_start done, waiting for backend ready");
 #else
-    ESP_LOGI(TAG, "WiFi/MQTT ready, going ACTIVE (no voice session)");
+    ESP_LOGI(TAG, "WiFi/MQTT ready, entering LISTENING (no voice session)");
 #endif
 
-    set_state(SYS_STATE_ACTIVE);
+    set_state(
+#if CONFIG_VOICE_SESSION_ENABLE
+        SYS_STATE_CONNECTING
+#else
+        SYS_STATE_LISTENING
+#endif
+    );
+}
+
+static void handle_session_end_for_active_state(void)
+{
+    TickType_t active_dur = xTaskGetTickCount() - s_active_since;
+    if (active_dur < pdMS_TO_TICKS(MIN_ACTIVE_FOR_SLEEP_MS)) {
+        enter_error_idle();
+    } else {
+        enter_sleeping();
+    }
 }
 
 static void state_task(void *arg)
@@ -221,18 +268,36 @@ static void state_task(void *arg)
             }
             break;
 
-        case SYS_STATE_ACTIVE:
-            if (evt.id == SYS_EVT_SESSION_END) {
-                TickType_t active_dur = xTaskGetTickCount() - s_active_since;
-                if (active_dur < pdMS_TO_TICKS(MIN_ACTIVE_FOR_SLEEP_MS)) {
-                    enter_error_idle();
-                } else {
-                    enter_sleeping();
-                }
+        case SYS_STATE_WAKING:
+        case SYS_STATE_CONNECTING:
+            if (evt.id == SYS_EVT_MQTT_FAIL || evt.id == SYS_EVT_SESSION_END) {
+                enter_error_idle();
+            } else if (evt.id == SYS_EVT_PI5_READY) {
+                ESP_LOGI(TAG, "Voice backend reported ready");
+                publish_state((sys_state_t)s_state);
+            } else if (evt.id == SYS_EVT_VOICE_LISTENING) {
+                set_state(SYS_STATE_LISTENING);
+            } else if (evt.id == SYS_EVT_VOICE_SPEAKING) {
+                set_state(SYS_STATE_SPEAKING);
             }
             break;
 
-        case SYS_STATE_WAKING:
+        case SYS_STATE_LISTENING:
+            if (evt.id == SYS_EVT_VOICE_SPEAKING) {
+                set_state(SYS_STATE_SPEAKING);
+            } else if (evt.id == SYS_EVT_SESSION_END) {
+                handle_session_end_for_active_state();
+            }
+            break;
+
+        case SYS_STATE_SPEAKING:
+            if (evt.id == SYS_EVT_VOICE_LISTENING) {
+                set_state(SYS_STATE_LISTENING);
+            } else if (evt.id == SYS_EVT_SESSION_END) {
+                handle_session_end_for_active_state();
+            }
+            break;
+
         case SYS_STATE_SLEEPING:
         default:
             break;

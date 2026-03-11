@@ -37,7 +37,7 @@ static void mqtt_post_event(sys_event_id_t id)
 {
     if (!s_evt_queue) return;
     sys_event_t evt = { .id = id };
-    (void)xQueueSend(s_evt_queue, &evt, 0);
+    (void)xQueueSend(s_evt_queue, &evt, pdMS_TO_TICKS(10));
 }
 
 static bool topic_equals(const esp_mqtt_event_handle_t event, const char *topic)

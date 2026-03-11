@@ -158,10 +158,21 @@ function updateESP32Status(online, state) {
 function updateVoiceStatus(voice) {
     const statusEl = document.getElementById('voice-status');
     const state = String(voice?.state || 'disconnected').toLowerCase();
-    const label =
+    const turnState = String(voice?.turn_state || 'idle').toLowerCase();
+    const bufferedMs = Number(voice?.buffered_ms || 0);
+    let label =
         state === 'listening' ? 'Listening' :
         state === 'speaking' ? 'Speaking' :
         state === 'connecting' ? 'Connecting' : 'Offline';
+    if (state === 'listening') {
+        if (turnState === 'speech') {
+            label = 'Listening / User speaking';
+        } else if (turnState === 'processing') {
+            label = 'Listening / Processing';
+        } else if (turnState === 'buffered' && bufferedMs > 0) {
+            label = `Listening / ${Math.max(0.1, bufferedMs / 1000).toFixed(1)}s buffered`;
+        }
+    }
     const badgeClass =
         state === 'listening' ? 'connected' :
         state === 'speaking' ? 'speaking' :

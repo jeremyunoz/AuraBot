@@ -43,6 +43,9 @@
 #endif
 
 static const char *TAG = "voice_conversation";
+static const char VAD_SPEECH_MSG[] = "{\"type\":\"vad\",\"state\":\"speech\"}";
+static const char VAD_SILENCE_MSG[] = "{\"type\":\"vad\",\"state\":\"silence\"}";
+static const char TURN_END_MSG[] = "{\"type\":\"turn_end\",\"source\":\"vad\"}";
 
 /* Use header definitions; local aliases for implementation. */
 #define SAMPLE_RATE         VOICE_SAMPLE_RATE
@@ -56,20 +59,23 @@ static const char *TAG = "voice_conversation";
 #define DECODER_QUEUE_LEN   VOICE_DECODER_QUEUE_LEN
 
 /* Internal: PCM/stream and task config (not part of public API). */
-#define PCM_BUF_SIZE            (FRAME_BYTES * 2)
+#define PCM_BACKLOG_DURATION_MS 1200
+#define PCM_BUF_FRAMES          (PCM_BACKLOG_DURATION_MS / FRAME_MS)
+#define PCM_BUF_SIZE            (FRAME_BYTES * PCM_BUF_FRAMES)
 #define ENCODER_TASK_STACK      24576
 #define ENCODER_TASK_PRIO       5
 #define PLAYBACK_TASK_STACK     2560
 #define PLAYBACK_TASK_PRIO      6
 #define DECODER_TASK_STACK      12288
 #define DECODER_TASK_PRIO       6
-#define SPEAK_TO_LISTEN_MS      500
+#define IDLE_POLL_MS            20
 #define ENCODER_RECV_TICKS      pdMS_TO_TICKS(FRAME_MS)
 #define ENCODER_SEND_TICKS      pdMS_TO_TICKS(80)
 
 typedef enum {
-    VOICE_PHASE_LISTEN = 0,
-    VOICE_PHASE_SPEAK  = 1,
+    VOICE_PHASE_CONNECTING = 0,
+    VOICE_PHASE_LISTEN     = 1,
+    VOICE_PHASE_SPEAK      = 2,
 } voice_phase_t;
 
 typedef struct {
@@ -78,10 +84,12 @@ typedef struct {
 } opus_packet_t;
 
 static volatile bool s_session_active;
+static volatile bool s_backend_ready;
+static volatile bool s_local_vad_speaking;
+static volatile bool s_pending_turn_commit;
 static volatile voice_phase_t s_phase;
-static voice_conversation_session_end_cb_t s_session_end_cb;
-static void *s_session_end_cb_arg;
-static bool s_session_end_notified;
+static voice_conversation_event_cb_t s_event_cb;
+static void *s_event_cb_arg;
 static OpusEncoder *s_opus_enc;
 static OpusDecoder *s_opus_dec;
 static StreamBufferHandle_t s_pcm_stream;
@@ -94,6 +102,119 @@ static uint8_t s_playback_buf[FRAME_BYTES];
 static uint8_t s_encoder_opus_buf[OPUS_MAX_PACKET];
 static int16_t s_encoder_pcm_frame[FRAME_SAMPLES];
 
+static bool is_remote_listening(void)
+{
+    return s_session_active && s_backend_ready && s_phase == VOICE_PHASE_LISTEN && voice_ws_is_connected();
+}
+
+static void send_control_message(const char *msg)
+{
+    if (!msg || !is_remote_listening()) {
+        return;
+    }
+
+    int sent = voice_ws_send_text(msg, strlen(msg), pdMS_TO_TICKS(100));
+    if (sent < 0) {
+        ESP_LOGW(TAG, "Failed to send control message");
+    }
+}
+
+static void maybe_send_turn_commit(size_t frame_bytes_filled)
+{
+    if (!s_pending_turn_commit || !s_pcm_stream) {
+        return;
+    }
+    if (!is_remote_listening()) {
+        return;
+    }
+    if (frame_bytes_filled != 0) {
+        return;
+    }
+    if (xStreamBufferBytesAvailable(s_pcm_stream) != 0) {
+        return;
+    }
+
+    send_control_message(VAD_SILENCE_MSG);
+    send_control_message(TURN_END_MSG);
+    s_pending_turn_commit = false;
+}
+
+static void notify_event(voice_conversation_event_t event)
+{
+    if (s_event_cb) {
+        s_event_cb(event, s_event_cb_arg);
+    }
+}
+
+static void reset_capture_stream(void)
+{
+    if (s_pcm_stream) {
+        (void)xStreamBufferReset(s_pcm_stream);
+    }
+}
+
+static void drain_decoder_queue(void)
+{
+    if (!s_decoder_queue) {
+        return;
+    }
+
+    opus_packet_t dropped;
+    while (xQueueReceive(s_decoder_queue, &dropped, 0) == pdTRUE) {
+    }
+}
+
+static void reset_tts_output(void)
+{
+    if (s_opus_dec) {
+        (void)opus_decoder_ctl(s_opus_dec, OPUS_RESET_STATE);
+    }
+    drain_decoder_queue();
+    if (s_playback_stream) {
+        (void)xStreamBufferReset(s_playback_stream);
+    }
+}
+
+static void set_phase(voice_phase_t phase, const char *reason)
+{
+    if (s_phase == phase) {
+        return;
+    }
+
+    s_phase = phase;
+    switch (phase) {
+    case VOICE_PHASE_CONNECTING:
+        s_pending_turn_commit = false;
+        ESP_LOGD(TAG, "Phase -> CONNECTING (%s)", reason);
+        break;
+    case VOICE_PHASE_LISTEN:
+        ESP_LOGD(TAG, "Phase -> LISTEN (%s)", reason);
+        notify_event(VOICE_CONVERSATION_EVENT_LISTENING);
+        if (s_local_vad_speaking) {
+            send_control_message(VAD_SPEECH_MSG);
+        }
+        break;
+    case VOICE_PHASE_SPEAK:
+        reset_capture_stream();
+        s_local_vad_speaking = false;
+        s_pending_turn_commit = false;
+        ESP_LOGD(TAG, "Phase -> SPEAK (%s)", reason);
+        notify_event(VOICE_CONVERSATION_EVENT_SPEAKING);
+        break;
+    default:
+        break;
+    }
+}
+
+static void set_backend_ready(void)
+{
+    if (s_backend_ready) {
+        return;
+    }
+    s_backend_ready = true;
+    notify_event(VOICE_CONVERSATION_EVENT_BACKEND_READY);
+}
+
 static void on_ws_data(void *arg, const uint8_t *data, size_t len, bool is_binary)
 {
     (void)arg;
@@ -101,9 +222,7 @@ static void on_ws_data(void *arg, const uint8_t *data, size_t len, bool is_binar
 
     if (is_binary) {
         if (!s_decoder_queue) return;
-        if (s_phase == VOICE_PHASE_LISTEN) {
-            s_phase = VOICE_PHASE_SPEAK;
-        }
+        set_phase(VOICE_PHASE_SPEAK, "binary_tts");
         size_t copy_len = len > OPUS_MAX_PACKET ? OPUS_MAX_PACKET : len;
         opus_packet_t item;
         item.len = copy_len;
@@ -122,19 +241,20 @@ static void on_ws_data(void *arg, const uint8_t *data, size_t len, bool is_binar
             if (cJSON_IsString(type) && type->valuestring) {
                 if (strcmp(type->valuestring, "hello") == 0) {
                     ESP_LOGI(TAG, "Server hello received");
+                } else if (strcmp(type->valuestring, "ready") == 0) {
+                    set_backend_ready();
+                    cJSON *phase = cJSON_GetObjectItem(root, "phase");
+                    if (cJSON_IsString(phase) && phase->valuestring &&
+                        strcmp(phase->valuestring, "speak") == 0) {
+                        set_phase(VOICE_PHASE_SPEAK, "ready");
+                    } else {
+                        set_phase(VOICE_PHASE_LISTEN, "ready");
+                    }
                 } else if (strcmp(type->valuestring, "tts_start") == 0) {
-                    s_phase = VOICE_PHASE_SPEAK;
-                    /* Reset decoder and flush playback so each TTS burst starts clean (xiaozhi ResetDecoder-style) */
-                    if (s_opus_dec) {
-                        opus_decoder_ctl(s_opus_dec, OPUS_RESET_STATE);
-                    }
-                    if (s_playback_stream) {
-                        xStreamBufferReset(s_playback_stream);
-                    }
-                    ESP_LOGD(TAG, "Phase -> SPEAK (tts_start)");
+                    reset_tts_output();
+                    set_phase(VOICE_PHASE_SPEAK, "tts_start");
                 } else if (strcmp(type->valuestring, "tts_end") == 0) {
-                    s_phase = VOICE_PHASE_LISTEN;
-                    ESP_LOGD(TAG, "Phase -> LISTEN (tts_end)");
+                    set_phase(VOICE_PHASE_LISTEN, "tts_end");
                 }
             }
             cJSON_Delete(root);
@@ -146,10 +266,11 @@ static void on_ws_disconnect(void *arg)
 {
     (void)arg;
     s_session_active = false;
-    if (s_session_end_cb && !s_session_end_notified) {
-        s_session_end_notified = true;
-        s_session_end_cb(s_session_end_cb_arg);
-    }
+    s_backend_ready = false;
+    s_local_vad_speaking = false;
+    s_pending_turn_commit = false;
+    s_phase = VOICE_PHASE_CONNECTING;
+    notify_event(VOICE_CONVERSATION_EVENT_SESSION_ENDED);
 }
 
 static void decoder_task(void *arg)
@@ -159,9 +280,8 @@ static void decoder_task(void *arg)
     opus_packet_t item;
 
     while (1) {
-        BaseType_t got = xQueueReceive(s_decoder_queue, &item, pdMS_TO_TICKS(SPEAK_TO_LISTEN_MS));
+        BaseType_t got = xQueueReceive(s_decoder_queue, &item, pdMS_TO_TICKS(200));
         if (got != pdTRUE) {
-            s_phase = VOICE_PHASE_LISTEN;
             continue;
         }
         if (!s_opus_dec || !s_playback_stream || item.len == 0) continue;
@@ -180,32 +300,56 @@ static void decoder_task(void *arg)
 static void encoder_task(void *arg)
 {
     (void)arg;
+    size_t frame_bytes_filled = 0;
+
     while (1) {
-        if (!s_session_active || !voice_ws_is_connected()) {
-            vTaskDelay(pdMS_TO_TICKS(50));
+        if (!s_session_active || !voice_ws_is_connected() || !s_backend_ready || s_phase != VOICE_PHASE_LISTEN) {
+            frame_bytes_filled = 0;
+            vTaskDelay(pdMS_TO_TICKS(IDLE_POLL_MS));
             continue;
         }
         if (!s_opus_enc || !s_pcm_stream) {
-            vTaskDelay(pdMS_TO_TICKS(50));
+            frame_bytes_filled = 0;
+            vTaskDelay(pdMS_TO_TICKS(IDLE_POLL_MS));
             continue;
         }
 
-        size_t received = xStreamBufferReceive(s_pcm_stream, s_encoder_pcm_frame, FRAME_BYTES, ENCODER_RECV_TICKS);
-        if (received != FRAME_BYTES) {
+        maybe_send_turn_commit(frame_bytes_filled);
+
+        size_t received = xStreamBufferReceive(
+            s_pcm_stream,
+            ((uint8_t *)s_encoder_pcm_frame) + frame_bytes_filled,
+            FRAME_BYTES - frame_bytes_filled,
+            ENCODER_RECV_TICKS
+        );
+        if (received == 0) {
+            if (s_pending_turn_commit && frame_bytes_filled > 0) {
+                memset(((uint8_t *)s_encoder_pcm_frame) + frame_bytes_filled, 0, FRAME_BYTES - frame_bytes_filled);
+                frame_bytes_filled = FRAME_BYTES;
+            } else {
+                maybe_send_turn_commit(frame_bytes_filled);
+                continue;
+            }
+        } else {
+            frame_bytes_filled += received;
+        }
+
+        if (frame_bytes_filled < FRAME_BYTES) {
             continue;
         }
 
         int len = opus_encode(s_opus_enc, s_encoder_pcm_frame, FRAME_SAMPLES, s_encoder_opus_buf, sizeof(s_encoder_opus_buf));
+        frame_bytes_filled = 0;
         if (len < 0) {
             ESP_LOGW(TAG, "opus_encode error %d", len);
             continue;
         }
-        if (s_phase == VOICE_PHASE_LISTEN) {
-            int sent = voice_ws_send_bin(s_encoder_opus_buf, len, ENCODER_SEND_TICKS);
-            if (sent != len) {
-                ESP_LOGW(TAG, "WS send_bin %d/%d", sent, len);
-            }
+        int sent = voice_ws_send_bin(s_encoder_opus_buf, len, ENCODER_SEND_TICKS);
+        if (sent != len) {
+            ESP_LOGW(TAG, "WS send_bin %d/%d", sent, len);
+            continue;
         }
+        maybe_send_turn_commit(frame_bytes_filled);
     }
 }
 
@@ -224,7 +368,7 @@ static void create_tasks_and_buffers(void)
 {
     if (s_pcm_stream != NULL) return;
 
-    s_pcm_stream      = xStreamBufferCreate(PCM_BUF_SIZE, FRAME_BYTES);
+    s_pcm_stream      = xStreamBufferCreateWithCaps(PCM_BUF_SIZE, FRAME_BYTES, VOICE_ALLOC_CAPS);
     s_playback_stream = xStreamBufferCreateWithCaps(PLAYBACK_BUF_SIZE, 1, VOICE_ALLOC_CAPS);
     s_decoder_queue   = xQueueCreateWithCaps(DECODER_QUEUE_LEN, sizeof(opus_packet_t), VOICE_ALLOC_CAPS);
     if (!s_pcm_stream || !s_playback_stream || !s_decoder_queue) {
@@ -282,6 +426,7 @@ static void create_tasks_and_buffers(void)
 void voice_conversation_push_pcm(const int16_t *pcm, size_t samples)
 {
     if (!s_session_active || !s_pcm_stream || !pcm) return;
+    if (s_phase == VOICE_PHASE_SPEAK) return;
     size_t bytes = samples * sizeof(int16_t);
     (void)xStreamBufferSend(s_pcm_stream, pcm, bytes, 0);
 }
@@ -289,6 +434,32 @@ void voice_conversation_push_pcm(const int16_t *pcm, size_t samples)
 bool voice_conversation_is_active(void)
 {
     return s_session_active;
+}
+
+bool voice_conversation_capture_enabled(void)
+{
+    return s_session_active && s_phase != VOICE_PHASE_SPEAK;
+}
+
+void voice_conversation_notify_vad(bool speaking)
+{
+    if (s_local_vad_speaking == speaking) {
+        return;
+    }
+
+    s_local_vad_speaking = speaking;
+    if (speaking) {
+        s_pending_turn_commit = false;
+        send_control_message(VAD_SPEECH_MSG);
+    }
+}
+
+void voice_conversation_commit_turn(void)
+{
+    if (!s_session_active) {
+        return;
+    }
+    s_pending_turn_commit = true;
 }
 
 esp_err_t voice_conversation_start(const char *uri)
@@ -301,11 +472,16 @@ esp_err_t voice_conversation_start(const char *uri)
         return ESP_ERR_INVALID_ARG;
     }
 
-    s_session_end_notified = false;
     create_tasks_and_buffers();
     if (!s_pcm_stream) {
         return ESP_FAIL;
     }
+
+    (void)xStreamBufferReset(s_pcm_stream);
+    if (s_playback_stream) {
+        (void)xStreamBufferReset(s_playback_stream);
+    }
+    drain_decoder_queue();
 
     int err = 0;
     /* Encoder: APPLICATION_AUDIO + VBR + AUTO bitrate (xiaozhi audio_service.h AS_OPUS_ENC_CONFIG).
@@ -329,6 +505,12 @@ esp_err_t voice_conversation_start(const char *uri)
 
     voice_ws_set_data_callback(on_ws_data, NULL);
     voice_ws_set_disconnect_callback(on_ws_disconnect, NULL);
+    voice_ws_set_connected_callback(NULL, NULL);
+
+    s_backend_ready = false;
+    s_local_vad_speaking = false;
+    s_pending_turn_commit = false;
+    s_phase = VOICE_PHASE_CONNECTING;
 
     esp_err_t ret = voice_ws_start(uri);
     if (ret != ESP_OK) {
@@ -340,23 +522,23 @@ esp_err_t voice_conversation_start(const char *uri)
     }
 
     s_session_active = true;
-    s_phase = VOICE_PHASE_LISTEN;
-    ESP_LOGI(TAG, "Voice conversation started (listen/speak alternation)");
+    ESP_LOGI(TAG, "Voice conversation started (xiaozhi-style buffered input + duplex phase control)");
     return ESP_OK;
 }
 
-void voice_conversation_set_session_end_callback(voice_conversation_session_end_cb_t cb, void *arg)
+void voice_conversation_set_event_callback(voice_conversation_event_cb_t cb, void *arg)
 {
-    s_session_end_cb = cb;
-    s_session_end_cb_arg = arg;
+    s_event_cb = cb;
+    s_event_cb_arg = arg;
 }
 
 void voice_conversation_stop(void)
 {
     s_session_active = false;
-    s_session_end_notified = false;
-    s_session_end_cb = NULL;
-    s_session_end_cb_arg = NULL;
+    s_backend_ready = false;
+    s_local_vad_speaking = false;
+    s_pending_turn_commit = false;
+    s_phase = VOICE_PHASE_CONNECTING;
 
     voice_ws_stop();
 
@@ -369,6 +551,16 @@ void voice_conversation_stop(void)
         s_opus_dec = NULL;
     }
 
+    if (s_pcm_stream) {
+        (void)xStreamBufferReset(s_pcm_stream);
+    }
+    if (s_decoder_queue) {
+        drain_decoder_queue();
+    }
+    if (s_playback_stream) {
+        (void)xStreamBufferReset(s_playback_stream);
+    }
+
     ESP_LOGI(TAG, "Voice conversation stopped");
 }
 
@@ -376,8 +568,11 @@ void voice_conversation_stop(void)
 
 void voice_conversation_push_pcm(const int16_t *pcm, size_t samples) { (void)pcm; (void)samples; }
 bool voice_conversation_is_active(void) { return false; }
+bool voice_conversation_capture_enabled(void) { return false; }
 esp_err_t voice_conversation_start(const char *uri) { (void)uri; return ESP_ERR_NOT_SUPPORTED; }
 void voice_conversation_stop(void) { }
-void voice_conversation_set_session_end_callback(voice_conversation_session_end_cb_t cb, void *arg) { (void)cb; (void)arg; }
+void voice_conversation_notify_vad(bool speaking) { (void)speaking; }
+void voice_conversation_commit_turn(void) { }
+void voice_conversation_set_event_callback(voice_conversation_event_cb_t cb, void *arg) { (void)cb; (void)arg; }
 
 #endif /* CONFIG_VOICE_SESSION_ENABLE */

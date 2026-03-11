@@ -1,17 +1,19 @@
 /**
  * @file wakeword.c
- * @brief Continuous wake-word detection using ESP-SR AFE + WakeNet
+ * @brief Continuous audio front-end using ESP-SR AFE + WakeNet + VAD
  *
  * Architecture (two FreeRTOS tasks):
  *   feed task  – reads 16 kHz mono PCM from the shared I2S RX channel
- *                and pushes frames into the AFE ring-buffer.
+ *                and pushes frames into the AFE ring-buffer for both wake-word
+ *                and conversation audio processing.
  *   fetch task – pulls processed frames from the AFE, checks the
- *                WakeNet result, and on detection: beeps, resets the
- *                ring-buffer, re-arms WakeNet, then resumes listening.
+ *                WakeNet result while idle, and during a live voice session
+ *                uses VAD + processed audio to drive turn-taking.
  */
 #include "audio/wakeword.h"
 
 #include <stdlib.h>
+#include <stdbool.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -36,6 +38,7 @@ static const char *TAG = "wakeword";
 #define FETCH_STACK_SIZE   8192
 #define TASK_PRIO          5
 #define COOLDOWN_MS        1500
+#define WAKEWORD_PAUSE_POLL_MS  40
 
 /* Shared context passed to both tasks */
 typedef struct {
@@ -55,7 +58,7 @@ static void wakeword_post_event(sys_event_id_t id)
 {
     if (!s_evt_queue) return;
     sys_event_t evt = { .id = id };
-    (void)xQueueSend(s_evt_queue, &evt, 0);
+    (void)xQueueSend(s_evt_queue, &evt, pdMS_TO_TICKS(10));
 }
 
 /* ------------------------------------------------------------------ */
@@ -90,11 +93,8 @@ static void feed_task(void *arg)
                      esp_err_to_name(ret), (unsigned)bytes_read, (unsigned)frame_bytes);
             continue;
         }
+
         afe->feed(afe_data, buf);
-        if (voice_session_is_active()) {
-            size_t samples = bytes_read / sizeof(int16_t);
-            voice_session_push_pcm(buf, samples);
-        }
     }
 }
 
@@ -106,29 +106,139 @@ static void fetch_task(void *arg)
     wakeword_ctx_t *ctx = (wakeword_ctx_t *)arg;
     const esp_afe_sr_iface_t *afe = ctx->afe;
     esp_afe_sr_data_t *afe_data   = ctx->afe_data;
+    bool wakenet_suspended = false;
+    bool vad_enabled = false;
+    bool capture_paused = false;
+    bool vad_speaking = false;
 
     ESP_LOGI(TAG, "fetch task running – listening for wake word");
 
     while (1) {
-        afe_fetch_result_t *res = afe->fetch(afe_data);
+        bool session_active = voice_session_is_active();
+        bool capture_enabled = voice_session_capture_enabled();
+
+        if (!session_active) {
+            if (vad_enabled) {
+                if (afe->disable_vad) {
+                    (void)afe->disable_vad(afe_data);
+                }
+                if (afe->reset_vad) {
+                    (void)afe->reset_vad(afe_data);
+                }
+                vad_enabled = false;
+                capture_paused = false;
+                vad_speaking = false;
+                ESP_LOGI(TAG, "VAD disabled after voice session ended");
+            }
+
+            if (wakenet_suspended) {
+                if (afe->reset_buffer) {
+                    (void)afe->reset_buffer(afe_data);
+                }
+                if (afe->enable_wakenet) {
+                    (void)afe->enable_wakenet(afe_data);
+                }
+                wakenet_suspended = false;
+                ESP_LOGI(TAG, "WakeNet resumed after voice session");
+            }
+
+            afe_fetch_result_t *res = afe->fetch_with_delay
+                ? afe->fetch_with_delay(afe_data, pdMS_TO_TICKS(200))
+                : afe->fetch(afe_data);
+            if (!res || res->ret_value != ESP_OK) {
+                continue;
+            }
+
+            if (res->wakeup_state == WAKENET_DETECTED) {
+                ESP_LOGI(TAG, "*** Wake word detected (index=%d) ***",
+                         res->wake_word_index);
+
+                wakeword_post_event(SYS_EVT_WAKE_DETECTED);
+
+                /* Re-arm WakeNet so it keeps listening continuously */
+                int wn_ret = afe->enable_wakenet(afe_data);
+                ESP_LOGI(TAG, "enable_wakenet returned %d", wn_ret);
+
+                /* Brief cooldown to avoid immediate re-trigger */
+                vTaskDelay(pdMS_TO_TICKS(COOLDOWN_MS));
+
+                ESP_LOGI(TAG, "Listening again for wake word...");
+            }
+            continue;
+        }
+
+        if (!wakenet_suspended) {
+            if (afe->disable_wakenet) {
+                (void)afe->disable_wakenet(afe_data);
+            }
+            if (afe->reset_buffer) {
+                (void)afe->reset_buffer(afe_data);
+            }
+            wakenet_suspended = true;
+            ESP_LOGI(TAG, "WakeNet paused while voice session is active");
+        }
+
+        if (!vad_enabled) {
+            if (afe->enable_vad) {
+                (void)afe->enable_vad(afe_data);
+            }
+            if (afe->reset_vad) {
+                (void)afe->reset_vad(afe_data);
+            }
+            vad_enabled = true;
+            capture_paused = false;
+            vad_speaking = false;
+            ESP_LOGI(TAG, "VAD enabled for live voice session");
+        }
+
+        afe_fetch_result_t *res = afe->fetch_with_delay
+            ? afe->fetch_with_delay(afe_data, pdMS_TO_TICKS(200))
+            : afe->fetch(afe_data);
         if (!res || res->ret_value != ESP_OK) {
             continue;
         }
 
-        if (res->wakeup_state == WAKENET_DETECTED) {
-            ESP_LOGI(TAG, "*** Wake word detected (index=%d) ***",
-                     res->wake_word_index);
+        if (!capture_enabled) {
+            if (!capture_paused) {
+                if (vad_speaking) {
+                    voice_session_notify_vad(false);
+                    vad_speaking = false;
+                }
+                if (afe->reset_vad) {
+                    (void)afe->reset_vad(afe_data);
+                }
+                capture_paused = true;
+                ESP_LOGD(TAG, "Conversation capture paused while bot is speaking");
+            }
+            continue;
+        }
 
-            wakeword_post_event(SYS_EVT_WAKE_DETECTED);
+        if (capture_paused) {
+            if (afe->reset_vad) {
+                (void)afe->reset_vad(afe_data);
+            }
+            capture_paused = false;
+            vad_speaking = false;
+        }
 
-            /* Re-arm WakeNet so it keeps listening continuously */
-            int wn_ret = afe->enable_wakenet(afe_data);
-            ESP_LOGI(TAG, "enable_wakenet returned %d", wn_ret);
+        if (res->vad_state == VAD_SPEECH) {
+            if (!vad_speaking) {
+                vad_speaking = true;
+                voice_session_notify_vad(true);
+                if (res->vad_cache && res->vad_cache_size > 0) {
+                    voice_session_push_pcm(res->vad_cache, (size_t)res->vad_cache_size / sizeof(int16_t));
+                }
+            }
+            if (res->data && res->data_size > 0) {
+                voice_session_push_pcm(res->data, (size_t)res->data_size / sizeof(int16_t));
+            }
+            continue;
+        }
 
-            /* Brief cooldown to avoid immediate re-trigger */
-            vTaskDelay(pdMS_TO_TICKS(COOLDOWN_MS));
-
-            ESP_LOGI(TAG, "Listening again for wake word...");
+        if (vad_speaking) {
+            vad_speaking = false;
+            voice_session_notify_vad(false);
+            voice_session_commit_turn();
         }
     }
 }
@@ -160,12 +270,16 @@ esp_err_t wakeword_start(void)
     }
     ESP_LOGI(TAG, "Using WakeNet model: %s", model_name);
 
-    /* Configure AFE: single-mic, WakeNet only, everything else off */
+    /* Configure AFE: single-mic WakeNet while idle, VAD while a voice session is active. */
     afe_config_t *cfg = afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     cfg->aec_init      = false;
     cfg->se_init       = false;
     cfg->ns_init       = false;
-    cfg->vad_init      = false;
+    cfg->vad_init      = true;
+    cfg->vad_mode      = VAD_MODE_2;
+    cfg->vad_min_speech_ms = 128;
+    cfg->vad_min_noise_ms  = 700;
+    cfg->vad_delay_ms      = 128;
     cfg->agc_init      = false;
     cfg->wakenet_init  = true;
     cfg->wakenet_mode  = DET_MODE_90;
