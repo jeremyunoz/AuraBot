@@ -637,6 +637,33 @@ async def voice_websocket(websocket: WebSocket):
                 text_queue.put_nowait(pending_text)
             return
 
+    async def _drain_stale_ws_frames():
+        """Consume WebSocket frames buffered during TTS to prevent phantom turns.
+
+        With deferred tts_start the ESP32 stays in LISTEN mode during gTTS
+        synthesis (~3-10 s) and keeps sending mic frames.  Those frames sit in
+        the uvicorn receive buffer.  After process_user_turn returns they must
+        be discarded so the assembler starts fresh.
+
+        Returns True if a client disconnect was detected.
+        """
+        nonlocal client_disconnected
+        drained = 0
+        while True:
+            try:
+                msg = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+            except asyncio.TimeoutError:
+                break
+            if msg.get("type") == "websocket.disconnect":
+                client_disconnected = True
+                if drained:
+                    logger.debug("Drained %d stale WS frames before disconnect", drained)
+                return True
+            drained += 1
+        if drained:
+            logger.info("Drained %d stale WS frames after TTS", drained)
+        return False
+
     async def process_user_turn(flush) -> bool:
         nonlocal exit_requested
 
@@ -746,10 +773,18 @@ async def voice_websocket(websocket: WebSocket):
         if greeting_frames:
             await send_tts_batch(greeting_frames)
 
+        async def _handle_turn(flush) -> bool:
+            """Process a flushed turn, then drain stale frames. Returns True to exit."""
+            if await process_user_turn(flush):
+                return True
+            if await _drain_stale_ws_frames():
+                return True
+            return False
+
         receive_poll_sec = max(0.05, VOICE_RX_POLL_MS / 1000.0)
         while True:
             flush = turn_assembler.maybe_flush_timeout()
-            if flush and await process_user_turn(flush):
+            if flush and await _handle_turn(flush):
                 break
 
             try:
@@ -775,7 +810,7 @@ async def voice_websocket(websocket: WebSocket):
 
                 flush = turn_assembler.append_pcm(pcm_chunk)
                 publish_turn_snapshot()
-                if flush and await process_user_turn(flush):
+                if flush and await _handle_turn(flush):
                     break
                 continue
 
@@ -795,12 +830,12 @@ async def voice_websocket(websocket: WebSocket):
             if msg_type == "vad":
                 flush = turn_assembler.note_vad(str(payload.get("state") or "silence"))
                 publish_turn_snapshot()
-                if flush and await process_user_turn(flush):
+                if flush and await _handle_turn(flush):
                     break
             elif msg_type == "turn_end":
                 flush = turn_assembler.commit_turn(str(payload.get("source") or "turn_end"))
                 publish_turn_snapshot()
-                if flush and await process_user_turn(flush):
+                if flush and await _handle_turn(flush):
                     break
 
         if client_disconnected:
