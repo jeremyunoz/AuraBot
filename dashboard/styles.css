@@ -194,6 +194,15 @@ main {
     background: #dc2626;
 }
 
+.btn-wellness {
+    background: #10b981;
+    color: white;
+}
+
+.btn-wellness:hover {
+    background: #059669;
+}
+
 .btn:disabled {
     background: #d1d5db;
     color: #9ca3af;

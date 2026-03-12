@@ -241,9 +241,18 @@ class TimerManager:
         else:
             notification = self.DEFAULT_NOTIFICATION_MESSAGE
         
-        # Speak notification
+        # Speak notification via voice WebSocket (ESP32 speaker) when available,
+        # otherwise fall back to self.tts_engine.speak() (local espeak / MQTT).
         try:
-            self.tts_engine.speak(notification)
+            spoken = False
+            try:
+                from backend.voice.voice_ws_server import is_voice_client_connected, enqueue_tts_text
+                if is_voice_client_connected() and enqueue_tts_text(notification):
+                    spoken = True
+            except ImportError:
+                pass
+            if not spoken:
+                self.tts_engine.speak(notification)
         except Exception as e:
             if hasattr(self.logger, 'log_error'):
                 self.logger.log_error(f"Error speaking timer notification: {e}")

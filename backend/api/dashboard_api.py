@@ -191,6 +191,27 @@ def create_app(aurabot: Optional[Any] = None) -> FastAPI:
     def api_control(request: Request, body: ControlBody):
         bot = _get_aurabot(request)
         data = {"cmd": body.cmd, **(body.params or {})}
+
+        if body.cmd == "trigger_wellness":
+            duration = int((body.params or {}).get("duration", 10))
+            duration = max(5, min(duration, 600))
+            try:
+                timer_id = bot.timer_manager.set_timer(
+                    duration_seconds=duration,
+                    name="Wellness Break",
+                    timer_type=bot.timer_manager.TIMER_TYPE_WELLNESS,
+                )
+                message = f"Demo wellness reminder. I've set a {duration}-second break timer."
+                try:
+                    from backend.voice.voice_ws_server import is_voice_client_connected, enqueue_tts_text
+                    if not (is_voice_client_connected() and enqueue_tts_text(message)):
+                        bot.tts_engine.speak(message)
+                except ImportError:
+                    bot.tts_engine.speak(message)
+                return {"status": "success", "command": "trigger_wellness", "timer_id": timer_id, "duration": duration}
+            except Exception as e:
+                return {"status": "error", "command": "trigger_wellness", "error": str(e)}
+
         if body.cmd == "move":
             action = (body.params or {}).get("action")
             if not isinstance(action, str) or not action.strip():

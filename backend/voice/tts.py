@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import threading
 import os
-from time import sleep
+from time import perf_counter, sleep
 
 """
     Text-to-Speech feature optimized for Raspberry Pi 5
@@ -20,6 +20,16 @@ from time import sleep
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
+
+# Read at call time (not import time) so that dotenv/.env values are respected
+# even when tts.py is imported before load_dotenv() runs.
+def _get_tts_pcm_gain() -> float:
+    return float(os.environ.get("VOICE_TTS_PCM_GAIN", "0.90"))
+
+def _get_voice_tts_prefer_online() -> bool:
+    return os.environ.get(
+        "VOICE_TTS_PREFER_ONLINE", "false"
+    ).lower() in ("1", "true", "yes")
 
 
 class TTS:
@@ -75,24 +85,41 @@ class TTS:
     # PCM synthesis (for voice WebSocket / Opus pipeline)
     # ------------------------------------------------------------------
 
-    def synthesize_pcm(self, text: str, prefer_online: bool = True) -> bytes:
+    def synthesize_pcm(
+        self,
+        text: str,
+        prefer_online: bool | None = None,
+        gain: float | None = None,
+    ) -> bytes:
         """Synthesize *text* to 16 kHz mono 16-bit little-endian PCM bytes.
 
-        When *prefer_online* is True (default), tries gTTS first; on failure
-        falls back to offline espeak-ng.  Set False to skip the network call.
+        *prefer_online*: True → gTTS first, False → offline only, None → read
+        VOICE_TTS_PREFER_ONLINE env at call time (default False).
+        *gain*: linear volume multiplier applied inside ffmpeg/sox (no Python
+        sample loop).  None → read VOICE_TTS_PCM_GAIN env at call time (default 0.90).
         """
         if not text or not text.strip():
             return b""
+        if prefer_online is None:
+            prefer_online = _get_voice_tts_prefer_online()
+        if gain is None:
+            gain = _get_tts_pcm_gain()
+
+        started_at = perf_counter()
         if prefer_online:
-            pcm = self._online_tts_to_pcm(text)
+            pcm = self._online_tts_to_pcm(text, gain=gain)
             if pcm:
-                logger.info("TTS: online (gTTS) succeeded")
+                total_ms = (perf_counter() - started_at) * 1000.0
+                logger.info("TTS: online (gTTS) succeeded in %.0f ms", total_ms)
                 return pcm
             logger.info("TTS: online failed, falling back to offline espeak")
-        return self._offline_tts_to_pcm(text)
+        pcm = self._offline_tts_to_pcm(text, gain=gain)
+        total_ms = (perf_counter() - started_at) * 1000.0
+        logger.info("TTS: offline (espeak) completed in %.0f ms", total_ms)
+        return pcm
 
-    def _online_tts_to_pcm(self, text: str) -> bytes | None:
-        """gTTS → MP3 → ffmpeg → 16 kHz mono PCM.  Returns None on failure."""
+    def _online_tts_to_pcm(self, text: str, gain: float = 1.0) -> bytes | None:
+        """gTTS → MP3 → ffmpeg (with gain) → 16 kHz mono PCM."""
         try:
             from gtts import gTTS
         except ImportError:
@@ -102,17 +129,26 @@ class TTS:
         try:
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
                 mp3_path = f.name
+            t0 = perf_counter()
             tts = gTTS(text=text, lang="en", slow=False)
             tts.save(mp3_path)
+            t1 = perf_counter()
+            cmd = [
+                "ffmpeg", "-y", "-i", mp3_path,
+                "-af", f"volume={gain}",
+                "-f", "s16le", "-acodec", "pcm_s16le",
+                "-ar", str(SAMPLE_RATE), "-ac", "1", "-",
+            ]
             out = subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", mp3_path,
-                    "-f", "s16le", "-acodec", "pcm_s16le",
-                    "-ar", str(SAMPLE_RATE), "-ac", "1", "-",
-                ],
-                check=True,
-                capture_output=True,
-                timeout=30,
+                cmd, check=True, capture_output=True, timeout=30,
+            )
+            t2 = perf_counter()
+            logger.info(
+                "TTS online: gtts=%.0f ms ffmpeg=%.0f ms total=%.0f ms chars=%d",
+                (t1 - t0) * 1000.0,
+                (t2 - t1) * 1000.0,
+                (t2 - t0) * 1000.0,
+                len(text),
             )
             return out.stdout
         except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
@@ -125,12 +161,13 @@ class TTS:
                 except OSError:
                     pass
 
-    def _offline_tts_to_pcm(self, text: str) -> bytes:
-        """espeak-ng → WAV → sox (or ffmpeg) → 16 kHz mono PCM."""
+    def _offline_tts_to_pcm(self, text: str, gain: float = 1.0) -> bytes:
+        """espeak-ng → WAV → sox (or ffmpeg, with gain) → 16 kHz mono PCM."""
         if not text or not text.strip():
             return b""
         wav_path = None
         try:
+            t0 = perf_counter()
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 wav_path = f.name
             espeak_args = ["-w", wav_path, "-s", "180", text]
@@ -149,16 +186,22 @@ class TTS:
                 except (FileNotFoundError, subprocess.CalledProcessError):
                     logger.warning("espeak-ng/espeak not available for offline TTS")
                     return b""
-            # Resample to 16 kHz mono PCM via sox, falling back to ffmpeg
+            t1 = perf_counter()
+            gain_db = 20 * __import__("math").log10(max(gain, 0.001))
             try:
                 out = subprocess.run(
                     [
                         "sox", wav_path,
                         "-r", str(SAMPLE_RATE), "-c", "1",
-                        "gain", "-n", "-0.05",
+                        "gain", f"{gain_db:.2f}",
                         "-t", "raw", "-",
                     ],
                     check=True, capture_output=True, timeout=15,
+                )
+                t2 = perf_counter()
+                logger.info(
+                    "TTS offline: espeak=%.0f ms sox=%.0f ms total=%.0f ms chars=%d",
+                    (t1 - t0) * 1000.0, (t2 - t1) * 1000.0, (t2 - t0) * 1000.0, len(text),
                 )
                 return out.stdout
             except (FileNotFoundError, subprocess.CalledProcessError):
@@ -166,10 +209,16 @@ class TTS:
                     out = subprocess.run(
                         [
                             "ffmpeg", "-y", "-i", wav_path,
+                            "-af", f"volume={gain}",
                             "-f", "s16le", "-acodec", "pcm_s16le",
                             "-ar", str(SAMPLE_RATE), "-ac", "1", "-",
                         ],
                         check=True, capture_output=True, timeout=15,
+                    )
+                    t2 = perf_counter()
+                    logger.info(
+                        "TTS offline: espeak=%.0f ms ffmpeg=%.0f ms total=%.0f ms chars=%d",
+                        (t1 - t0) * 1000.0, (t2 - t1) * 1000.0, (t2 - t0) * 1000.0, len(text),
                     )
                     return out.stdout
                 except (FileNotFoundError, subprocess.CalledProcessError):

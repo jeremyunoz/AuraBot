@@ -168,38 +168,45 @@ class WellnessTimerTrigger:
                 # This ensures we wait for another full threshold period before next trigger
                 self._last_trigger_session_time = session_time_seconds
                 
-                # Optional: Announce via TTS
-                if self.tts_engine:
+                # Announce via TTS (prefer voice WebSocket → ESP32 speaker)
+                try:
+                    hours = int(session_time_seconds // 3600)
+                    minutes = int((session_time_seconds % 3600) // 60)
+                    if hours > 0:
+                        time_str = f"{hours} hour{'s' if hours != 1 else ''}"
+                        if minutes > 0:
+                            time_str += f" and {minutes} minute{'s' if minutes != 1 else ''}"
+                    else:
+                        time_str = f"{minutes} minute{'s' if minutes != 1 else ''}"
+                    
+                    message = (
+                        f"You've been sitting for {time_str}. "
+                        f"I've set a {self.break_duration_seconds // 60}-minute break timer."
+                    )
+                    spoken = False
                     try:
-                        hours = int(session_time_seconds // 3600)
-                        minutes = int((session_time_seconds % 3600) // 60)
-                        if hours > 0:
-                            time_str = f"{hours} hour{'s' if hours != 1 else ''}"
-                            if minutes > 0:
-                                time_str += f" and {minutes} minute{'s' if minutes != 1 else ''}"
-                        else:
-                            time_str = f"{minutes} minute{'s' if minutes != 1 else ''}"
-                        
-                        message = (
-                            f"You've been sitting for {time_str}. "
-                            f"I've set a {self.break_duration_seconds // 60}-minute break timer."
-                        )
+                        from backend.voice.voice_ws_server import is_voice_client_connected, enqueue_tts_text
+                        if is_voice_client_connected() and enqueue_tts_text(message):
+                            spoken = True
+                    except ImportError:
+                        pass
+                    if not spoken and self.tts_engine:
                         self.tts_engine.speak(message)
-                        if self.logger:
-                            self.logger.log_wellness(
-                                f"Wellness timer created: {message}",
-                                "INFO",
-                                metadata={
-                                    "timer_id": timer_id,
-                                    "session_time_seconds": session_time_seconds,
-                                    "break_duration_seconds": self.break_duration_seconds
-                                }
-                            )
-                    except Exception as e:
-                        if self.logger:
-                            self.logger.log_error(f"Error announcing wellness timer: {e}")
-                        else:
-                            print(f"Error announcing wellness timer: {e}")
+                    if self.logger:
+                        self.logger.log_wellness(
+                            f"Wellness timer created: {message}",
+                            "INFO",
+                            metadata={
+                                "timer_id": timer_id,
+                                "session_time_seconds": session_time_seconds,
+                                "break_duration_seconds": self.break_duration_seconds
+                            }
+                        )
+                except Exception as e:
+                    if self.logger:
+                        self.logger.log_error(f"Error announcing wellness timer: {e}")
+                    else:
+                        print(f"Error announcing wellness timer: {e}")
                 
                 return timer_id
                 

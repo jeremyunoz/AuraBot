@@ -351,6 +351,10 @@ function setupControls() {
             sendMove(action);
         });
     });
+
+    document.getElementById('btn-trigger-wellness').addEventListener('click', () => {
+        sendControl('trigger_wellness', { duration: 10 });
+    });
 }
 
 // Start polling

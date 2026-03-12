@@ -32,7 +32,6 @@ import json
 import logging
 import os
 import queue
-import struct
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -84,8 +83,6 @@ else:
             _TTS_MIN_SEND_INTERVAL_MS,
             _TTS_MAX_SEND_INTERVAL_MS,
         )
-# Gentle gain for TTS PCM (1.0 = no change). Slightly < 1 reduces sharp/harsh output.
-TTS_PCM_GAIN = float(os.environ.get("VOICE_TTS_PCM_GAIN", "0.90"))
 VOICE_WS_GREETING_ON_CONNECT = os.environ.get("VOICE_WS_GREETING_ON_CONNECT", "false").lower() in ("1", "true", "yes")
 VOICE_TURN_MIN_MS = int(os.environ.get("VOICE_TURN_MIN_MS", "500"))
 VOICE_TURN_IDLE_COMMIT_MS = int(os.environ.get("VOICE_TURN_IDLE_COMMIT_MS", "850"))
@@ -242,70 +239,121 @@ def enqueue_tts_text(text: str) -> bool:
     return True
 
 
-def _apply_tts_gain(pcm_bytes: bytes, gain: float) -> bytes:
-    """Apply linear gain to 16-bit mono PCM. Clips to int16 range."""
-    if not pcm_bytes or gain == 1.0:
-        return pcm_bytes
-    samples = list(struct.unpack(f"<{len(pcm_bytes) // 2}h", pcm_bytes))
-    scaled = [max(-32768, min(32767, int(s * gain))) for s in samples]
-    return struct.pack(f"<{len(scaled)}h", *scaled)
+try:
+    import numpy as np
+    _NP_AVAILABLE = True
+except ImportError:
+    _NP_AVAILABLE = False
 
 
 def _build_tts_encoder():
-    """Build a dedicated Opus encoder for one TTS job."""
+    """Build a dedicated Opus encoder for TTS."""
     encoder = Encoder(SAMPLE_RATE, CHANNELS, "audio")
-    try:
-        encoder.bitrate = OPUS_TTS_BITRATE
-    except Exception:
-        pass
-    try:
-        encoder.vbr = OPUS_TTS_VBR
-    except Exception:
-        pass
-    try:
-        encoder.inband_fec = OPUS_TTS_INBAND_FEC
-    except Exception:
-        pass
-    try:
-        encoder.packet_loss_perc = OPUS_TTS_PACKET_LOSS_PERC
-    except Exception:
-        pass
-    try:
-        encoder.complexity = OPUS_TTS_COMPLEXITY
-    except Exception:
-        pass
+    for attr, val in (
+        ("bitrate", OPUS_TTS_BITRATE),
+        ("vbr", OPUS_TTS_VBR),
+        ("inband_fec", OPUS_TTS_INBAND_FEC),
+        ("packet_loss_perc", OPUS_TTS_PACKET_LOSS_PERC),
+        ("complexity", OPUS_TTS_COMPLEXITY),
+    ):
+        try:
+            setattr(encoder, attr, val)
+        except Exception:
+            pass
     return encoder
 
 
+_tts_encoder: "Encoder | None" = None
+_tts_encoder_lock = threading.Lock()
+
+
+def _get_tts_encoder():
+    """Return a shared Opus encoder, creating it once."""
+    global _tts_encoder
+    if _tts_encoder is None:
+        with _tts_encoder_lock:
+            if _tts_encoder is None:
+                _tts_encoder = _build_tts_encoder()
+    return _tts_encoder
+
+
 def _pcm_to_opus_frames(pcm_bytes: bytes) -> list:
-    """Chunk PCM into 60 ms frames and encode to Opus. Returns list of bytes (each frame).
-    Pads trailing bytes with silence so the last frame is complete (avoids abrupt cut)."""
+    """Batch encode: PCM → list of Opus frames (used by non-streaming callers)."""
     if not pcm_bytes:
         return []
-    encoder = _build_tts_encoder()
-    pcm_bytes = _apply_tts_gain(pcm_bytes, TTS_PCM_GAIN)
-    # Pad to a multiple of FRAME_BYTES so we don't drop the tail (avoids harsh cut at end)
+    encoder = _get_tts_encoder()
     remainder = len(pcm_bytes) % FRAME_BYTES
     if remainder:
         pcm_bytes = pcm_bytes + (b"\x00" * (FRAME_BYTES - remainder))
+    if _NP_AVAILABLE:
+        pcm_arr = np.frombuffer(pcm_bytes, dtype=np.int16)
+        frames = []
+        for i in range(0, len(pcm_arr), FRAME_SAMPLES):
+            chunk = pcm_arr[i : i + FRAME_SAMPLES].tobytes()
+            try:
+                frames.append(encoder.encode(chunk, FRAME_SAMPLES))
+            except Exception as e:
+                logger.debug("opus encode skip: %s", e)
+        return frames
     frames = []
     n = 0
     while n + FRAME_BYTES <= len(pcm_bytes):
         chunk = pcm_bytes[n : n + FRAME_BYTES]
         n += FRAME_BYTES
         try:
-            opus_frame = encoder.encode(chunk, FRAME_SAMPLES)
-            frames.append(opus_frame)
+            frames.append(encoder.encode(chunk, FRAME_SAMPLES))
         except Exception as e:
             logger.debug("opus encode skip: %s", e)
     return frames
 
 
+# Sentinel value pushed to the streaming queue to signal "encoding done".
+_STREAM_END = object()
+
+
+def _pcm_to_opus_stream(pcm_bytes: bytes, out_queue: queue.Queue) -> int:
+    """Encode PCM to Opus and push each frame to *out_queue* immediately.
+
+    The caller (async drain loop) can start sending frames to the ESP32 while
+    encoding continues.  Pushes ``_STREAM_END`` when finished.
+
+    Returns the total number of frames produced.
+    """
+    if not pcm_bytes:
+        out_queue.put(_STREAM_END)
+        return 0
+    encoder = _get_tts_encoder()
+    remainder = len(pcm_bytes) % FRAME_BYTES
+    if remainder:
+        pcm_bytes = pcm_bytes + (b"\x00" * (FRAME_BYTES - remainder))
+    count = 0
+    if _NP_AVAILABLE:
+        pcm_arr = np.frombuffer(pcm_bytes, dtype=np.int16)
+        for i in range(0, len(pcm_arr), FRAME_SAMPLES):
+            chunk = pcm_arr[i : i + FRAME_SAMPLES].tobytes()
+            try:
+                out_queue.put(encoder.encode(chunk, FRAME_SAMPLES))
+                count += 1
+            except Exception as e:
+                logger.debug("opus encode skip: %s", e)
+    else:
+        n = 0
+        while n + FRAME_BYTES <= len(pcm_bytes):
+            chunk = pcm_bytes[n : n + FRAME_BYTES]
+            n += FRAME_BYTES
+            try:
+                out_queue.put(encoder.encode(chunk, FRAME_SAMPLES))
+                count += 1
+            except Exception as e:
+                logger.debug("opus encode skip: %s", e)
+    out_queue.put(_STREAM_END)
+    return count
+
+
 async def _send_tts_frames(websocket: WebSocket, frames: list):
-    """Send Opus frames with prebuffer+paced strategy for smooth ESP32 playback."""
+    """Send a pre-built list of Opus frames with prebuffer+paced strategy."""
     pace_sec = TTS_SEND_INTERVAL_MS / 1000.0 if TTS_SEND_INTERVAL_MS > 0 else 0.0
     if TTS_ADAPTIVE_PREFILL:
-        # Short replies can tolerate extra prefill to reduce startup jitter; long replies should prefill less.
         prefill_frames = TTS_PREFILL_LONG_FRAMES if len(frames) >= TTS_LONG_TTS_FRAME_THRESHOLD else TTS_PREFILL_SHORT_FRAMES
     else:
         prefill_frames = TTS_PREFILL_FRAMES
@@ -313,14 +361,69 @@ async def _send_tts_frames(websocket: WebSocket, frames: list):
     loop = asyncio.get_running_loop()
     pacing_origin = loop.time()
     for i, opus_frame in enumerate(frames):
-        # Prebuffer initial frames immediately; then use absolute-time pacing to reduce jitter drift.
         if pace_sec > 0 and i >= prefill_frames:
             scheduled_at = pacing_origin + ((i - prefill_frames) * pace_sec)
-            now = loop.time()
-            sleep_for = scheduled_at - now
+            sleep_for = scheduled_at - loop.time()
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
         await websocket.send_bytes(opus_frame)
+
+
+def _drain_frame_queue(frame_queue: queue.Queue):
+    """Discard remaining frames so the encoder thread can finish."""
+    while True:
+        try:
+            item = frame_queue.get_nowait()
+            if item is _STREAM_END:
+                break
+        except queue.Empty:
+            break
+
+
+async def _send_tts_frames_streaming(
+    websocket: WebSocket,
+    frame_queue: queue.Queue,
+    poll_interval: float = 0.005,
+    on_first_frame=None,
+):
+    """Send Opus frames from a thread-safe queue as they arrive (streaming).
+
+    Pacing origin is set when the *first post-prefill* frame is sent, not when
+    polling starts.  This avoids a burst of catch-up frames after TTS synthesis
+    latency, which would overflow the ESP32 playback buffer.
+
+    *on_first_frame*: optional async callable invoked once, right before the
+    first Opus frame is sent.  Used to defer ``tts_start`` until audio is
+    actually ready (avoids a multi-second gap when using online TTS).
+    """
+    pace_sec = TTS_SEND_INTERVAL_MS / 1000.0 if TTS_SEND_INTERVAL_MS > 0 else 0.0
+    prefill = max(0, TTS_PREFILL_SHORT_FRAMES if TTS_ADAPTIVE_PREFILL else TTS_PREFILL_FRAMES)
+    loop = asyncio.get_running_loop()
+    pacing_origin: float | None = None
+    idx = 0
+    try:
+        while True:
+            try:
+                frame = frame_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(poll_interval)
+                continue
+            if frame is _STREAM_END:
+                break
+            if idx == 0 and on_first_frame is not None:
+                await on_first_frame()
+            if pace_sec > 0 and idx >= prefill:
+                if pacing_origin is None:
+                    pacing_origin = loop.time()
+                scheduled_at = pacing_origin + ((idx - prefill) * pace_sec)
+                sleep_for = scheduled_at - loop.time()
+                if sleep_for > 0:
+                    await asyncio.sleep(sleep_for)
+            await websocket.send_bytes(frame)
+            idx += 1
+    except (WebSocketDisconnect, Exception):
+        _drain_frame_queue(frame_queue)
+        raise
 
 
 @app.websocket("/voice")
@@ -395,7 +498,8 @@ async def voice_websocket(websocket: WebSocket):
             and pending_tts_queue.empty()
         )
 
-    async def send_tts_batch(frames: list):
+    async def send_tts_batch(frames):
+        """Send pre-encoded frames (list) to ESP32."""
         if not frames:
             return
         tts_started = False
@@ -418,7 +522,46 @@ async def voice_websocket(websocket: WebSocket):
             except Exception:
                 pass
             raise
+        _set_voice_client_state(phase="listen")
+        publish_turn_snapshot()
 
+    async def send_tts_streaming(frame_queue: queue.Queue):
+        """Stream-send frames from a queue (concurrent with encoding).
+
+        ``tts_start`` is deferred until the first Opus frame is ready so the
+        ESP32 stays in LISTEN mode during online-TTS synthesis (~3-5 s for
+        gTTS) instead of sitting in SPEAK mode with no audio.
+
+        On disconnect, drains remaining frames so the encoder thread exits.
+        """
+        tts_started = False
+
+        async def _on_first_frame():
+            nonlocal tts_started
+            await websocket.send_text(TTS_START_MSG)
+            tts_started = True
+            _set_voice_client_state(phase="speak", turn_state="replying", buffered_ms=0)
+
+        try:
+            await _send_tts_frames_streaming(
+                websocket, frame_queue, on_first_frame=_on_first_frame,
+            )
+            if tts_started:
+                await websocket.send_text(TTS_END_MSG)
+        except (WebSocketDisconnect, Exception) as exc:
+            _drain_frame_queue(frame_queue)
+            if tts_started:
+                try:
+                    await websocket.send_text(TTS_END_MSG)
+                except Exception:
+                    pass
+                _set_voice_client_state(phase="listen")
+                publish_turn_snapshot()
+            try:
+                await websocket.close(code=1011, reason="tts_send_failed")
+            except Exception:
+                pass
+            raise
         _set_voice_client_state(phase="listen")
         publish_turn_snapshot()
 
@@ -442,51 +585,57 @@ async def voice_websocket(websocket: WebSocket):
                 logger.debug("drain_tts_queue: %s", e)
 
     async def drain_text_tts_queue():
-        """Drain thread-safe text TTS queue (timer/wellness): online TTS → Opus → pending_tts_queue."""
+        """Drain thread-safe text TTS queue (timer/wellness): TTS → Opus → pending_tts_queue."""
         text_queue = _get_pending_text_tts_queue()
         pending_text = None
         pending_frames = None
 
         try:
             while True:
-                if pending_frames is None:
+                try:
+                    if pending_frames is None:
+                        if not can_dispatch_external_tts():
+                            await asyncio.sleep(0.1)
+                            continue
+                        try:
+                            pending_text = text_queue.get_nowait()
+                        except queue.Empty:
+                            await asyncio.sleep(0.2)
+                            continue
+                        if not pending_text or not pending_text.strip():
+                            pending_text = None
+                            continue
+
+                        text_to_speak = pending_text
+                        def do_online_tts():
+                            pcm = tts_engine.synthesize_pcm(text_to_speak)
+                            return _pcm_to_opus_frames(pcm) if pcm else []
+
+                        pending_frames = await loop.run_in_executor(_executor, do_online_tts)
+                        if not pending_frames:
+                            logger.warning("drain_text_tts_queue: TTS produced no audio for: %s", pending_text[:80])
+                            pending_text = None
+                            pending_frames = None
+                            continue
+
                     if not can_dispatch_external_tts():
                         await asyncio.sleep(0.1)
                         continue
-                    try:
-                        pending_text = text_queue.get_nowait()
-                    except queue.Empty:
-                        await asyncio.sleep(0.2)
-                        continue
-                    if not pending_text or not pending_text.strip():
-                        pending_text = None
-                        continue
 
-                    def do_online_tts():
-                        pcm = tts_engine.synthesize_pcm(pending_text)
-                        return _pcm_to_opus_frames(pcm) if pcm else []
-
-                    pending_frames = await loop.run_in_executor(_executor, do_online_tts)
-                    if not pending_frames:
-                        pending_text = None
-                        pending_frames = None
-                        continue
-
-                if not can_dispatch_external_tts():
-                    await asyncio.sleep(0.1)
-                    continue
-
-                pending_tts_queue.put_nowait(pending_frames)
-                pending_text = None
-                pending_frames = None
+                    pending_tts_queue.put_nowait(pending_frames)
+                    pending_text = None
+                    pending_frames = None
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning("drain_text_tts_queue: error (retrying): %s", e)
+                    pending_text = None
+                    pending_frames = None
+                    await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             if pending_text:
                 text_queue.put_nowait(pending_text)
             return
-        except Exception as e:
-            if pending_text:
-                text_queue.put_nowait(pending_text)
-            logger.debug("drain_text_tts_queue: %s", e)
 
     async def process_user_turn(flush) -> bool:
         nonlocal exit_requested
@@ -540,11 +689,32 @@ async def voice_websocket(websocket: WebSocket):
             if not response_text:
                 return False
 
-            def do_tts():
-                pcm = tts_engine.synthesize_pcm(response_text)
-                return _pcm_to_opus_frames(pcm)
+            # Streaming TTS: synthesize PCM in a worker thread, then encode
+            # Opus frames and push them to a queue.  The send coroutine reads
+            # from that queue concurrently so the ESP32 hears audio while
+            # encoding continues.
+            frame_q: queue.Queue = queue.Queue()
 
-            opus_frames = await loop.run_in_executor(_executor, do_tts)
+            def do_tts_synth():
+                """Worker: synthesize PCM then stream-encode to Opus."""
+                pcm = tts_engine.synthesize_pcm(response_text)
+                _pcm_to_opus_stream(pcm, frame_q)
+
+            encode_future = loop.run_in_executor(_executor, do_tts_synth)
+            send_error = None
+            try:
+                await send_tts_streaming(frame_q)
+            except (WebSocketDisconnect, Exception) as exc:
+                send_error = exc
+                _drain_frame_queue(frame_q)
+            # Always let the encoder thread finish before moving on.
+            try:
+                await encode_future
+            except Exception:
+                pass
+            if send_error is not None:
+                raise send_error
+
             t3 = time.perf_counter()
             tts_ms = (t3 - t2) * 1000.0
             total_ms = (t3 - t0) * 1000.0
@@ -553,11 +723,9 @@ async def voice_websocket(websocket: WebSocket):
                 stt_ms, response_ms, tts_ms, total_ms,
             )
             _write_voice_latency_log(stt_ms, response_ms, tts_ms, total_ms, transcript or "")
-            if opus_frames:
-                pending_tts_queue.put_nowait(opus_frames)
             return False
         finally:
-            turn_assembler.set_processing(False)
+            turn_assembler.reset()
             publish_turn_snapshot()
 
     try:
@@ -637,6 +805,8 @@ async def voice_websocket(websocket: WebSocket):
 
         if client_disconnected:
             logger.info("Voice WS: client disconnected after %d frames", frame_count)
+    except WebSocketDisconnect:
+        logger.warning("Voice WS: client disconnected (mid-send) after %d frames", frame_count)
     except Exception as e:
         logger.exception("Voice WS: error after %d frames: %s", frame_count, e)
     finally:

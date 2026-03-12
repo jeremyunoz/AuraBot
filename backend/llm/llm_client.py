@@ -379,6 +379,12 @@ class LLMClient:
         self._temperature = temperature
         self._max_output_tokens = max_output_tokens
 
+        # Some models (e.g. Gemma 3 via Gemini API) do not support
+        # the system/developer instruction channel. For those, we
+        # inject the system prompt into the conversation instead.
+        model_lower = (self._model or "").lower()
+        self._supports_system_instruction = not model_lower.startswith("gemma-3-")
+
         # Conversation history: list of {"role": "user"|"model", "content": str}
         self._history: List[Dict[str, str]] = []
 
@@ -411,17 +417,22 @@ class LLMClient:
         self._trim_history()
 
         # Build the contents list for the API call
-        contents = self._build_contents()
+        contents = self._build_contents(
+            inject_system_as_user=not self._supports_system_instruction
+        )
 
         try:
+            config_kwargs = dict(
+                temperature=self._temperature,
+                max_output_tokens=self._max_output_tokens,
+            )
+            if self._supports_system_instruction:
+                config_kwargs["system_instruction"] = self._system_prompt
+
             response = self._client.models.generate_content(
                 model=self._model,
                 contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=self._system_prompt,
-                    temperature=self._temperature,
-                    max_output_tokens=self._max_output_tokens,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
 
             assistant_text = _strip_think_blocks(self._extract_text(response))
@@ -451,7 +462,7 @@ class LLMClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_contents(self) -> list:
+    def _build_contents(self, inject_system_as_user: bool = False) -> list:
         """
         Build the contents list from conversation history.
         
@@ -459,6 +470,17 @@ class LLMClient:
             List of Content objects for the Gemini API.
         """
         contents = []
+
+        # For models that don't support system_instruction, prepend the
+        # AuraBot persona as a user message so the model still sees it.
+        if inject_system_as_user and self._system_prompt:
+            contents.append(
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=self._system_prompt)],
+                )
+            )
+
         for msg in self._history:
             contents.append(
                 types.Content(

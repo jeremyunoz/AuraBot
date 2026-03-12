@@ -11,10 +11,14 @@ _project_root = os.path.dirname(_backend_dir)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+from dotenv import load_dotenv
+
+# Load .env BEFORE backend imports so that modules reading os.environ at import
+# time (e.g. voice_ws_server Opus tuning params) see the configured values.
+load_dotenv()
+
 from time import sleep
 from typing import Optional, Dict, List
-
-from dotenv import load_dotenv
 
 from backend.core.logger import AuraBotLogger, ConversationLogger
 from backend.llm import (
@@ -32,9 +36,6 @@ from backend.timer import TimerManager, WellnessTimerTrigger
 from backend.vision.vision_integration import start_vision_integration
 from backend.voice.tts import TTS
 import traceback
-
-# Load environment variables
-load_dotenv()
 
 # When vision uses IMX (MODLIB_LIBCAMERA=LOCAL), ensure child processes see libcamera from /usr/local (v0.7+).
 # For the current process to use IMX, set LD_LIBRARY_PATH before starting Python (e.g. scripts/run_backend_imx.sh).
