@@ -43,6 +43,29 @@ class MQTTAPI:
         self.tts_engine = aurabot.tts_engine
         self.logger = logger or getattr(aurabot, 'logger', None)
         
+        # Break compliance configuration and state
+        # When enabled, AuraBot tracks whether the user actually leaves the desk
+        # after a wellness break is requested and can trigger a physical "hit"
+        # via ESP32 movement if the user repeatedly ignores breaks.
+        self._break_compliance_enabled: bool = True
+        # Number of seconds after a wellness prompt during which the user is
+        # expected to leave before a violation is counted.
+        self._break_leave_grace_seconds: float = 10.0
+        # How many ignored breaks before triggering the physical hit.
+        self._max_break_violations_before_hit: int = 3
+        # ESP32 movement action to use for the hit.
+        self._hit_action: str = "swing"
+        # Internal runtime state
+        self._break_violation_count: int = 0
+        self._pending_break: bool = False
+        self._pending_break_prompt_time: Optional[float] = None
+        self._last_presence_state: Optional[bool] = None
+        self._last_hit_time: Optional[float] = None
+        # Remaining wellness break time when user returns early (paused break).
+        self._paused_wellness_remaining: Optional[float] = None
+        # Cooldown between hits to avoid spamming movement.
+        self._hit_cooldown_seconds: float = 60.0
+        
         # Initialize wellness timer trigger with optional configuration
         # Pass callback to clear debounce counters when wellness timer is created
         self.wellness_trigger = WellnessTimerTrigger(
@@ -51,9 +74,12 @@ class MQTTAPI:
             sitting_threshold_seconds=wellness_threshold_seconds,
             break_duration_seconds=wellness_break_duration_seconds,
             pause_timeout_seconds=wellness_pause_timeout_seconds,
-            on_wellness_timer_created=self._clear_debounce_counters,
+            on_wellness_timer_created=self._on_wellness_timer_created,
             on_pause_timeout=self._handle_wellness_pause_timeout,
-            logger=self.logger
+            logger=self.logger,
+            # Defer creation of the actual wellness timer until presence logic
+            # confirms the user has left the desk.
+            create_timer_immediately=False,
         )
         
         # Start background monitoring of session time
@@ -108,6 +134,36 @@ class MQTTAPI:
         
         # Start timeout monitoring
         self._start_timeout_monitoring()
+    
+    def _on_wellness_timer_created(self):
+        """
+        Callback invoked when a wellness timer is created.
+        
+        Extends the basic debounce reset with break-compliance tracking so we
+        can observe whether the user actually leaves the desk after being
+        prompted for a wellness break.
+        """
+        # Preserve existing behavior: clear presence debounce counters.
+        self._clear_debounce_counters()
+        
+        if not self._break_compliance_enabled:
+            return
+        
+        now = time.time()
+        self._pending_break = True
+        self._pending_break_prompt_time = now
+        # When a new wellness break is requested, we start watching presence;
+        # do not immediately clear violation count so repeated failures across
+        # a session are still tracked.
+        if self.logger:
+            self.logger.log_wellness(
+                "Wellness break requested; awaiting user to leave desk",
+                "INFO",
+                metadata={
+                    "break_leave_grace_seconds": self._break_leave_grace_seconds,
+                    "current_violation_count": self._break_violation_count,
+                },
+            )
     
     def _clear_debounce_counters(self):
         """
@@ -273,8 +329,15 @@ class MQTTAPI:
             timer_type=TimerManager.TIMER_TYPE_WELLNESS
         )
         wellness_timer_active = len(active_wellness_timers) > 0
-        if not wellness_timer_active:
-            # Reset log suppression after wellness break ends
+        # Treat a paused wellness break (user returned early) as still active
+        # for the purpose of blocking session restarts until the full break
+        # duration has been taken.
+        effective_wellness_active = wellness_timer_active or (
+            self._paused_wellness_remaining is not None
+        )
+        if not effective_wellness_active:
+            # Reset log suppression after wellness break ends (including when
+            # a paused break is fully completed).
             self._wellness_hold_logged = False
         
         # Build response with current state
@@ -309,6 +372,102 @@ class MQTTAPI:
             "actions": []
         }
         
+        # Track presence transitions for break-compliance decisions
+        previous_presence = self._last_presence_state
+        self._last_presence_state = is_present
+        
+        # Break compliance and break countdown: monitor what happens after a
+        # wellness break is requested. The actual wellness timer (countdown)
+        # is only created once presence confirms the user has left the desk,
+        # and it is paused if the user returns early.
+        if self._break_compliance_enabled:
+            # Case 1: new wellness break requested, waiting for first absence.
+            if self._pending_break:
+                if previous_presence is not False and not is_present:
+                    # User finally left the desk after a wellness prompt.
+                    # Create the wellness timer countdown now and pause the session.
+                    duration = self.wellness_trigger.break_duration_seconds
+                    try:
+                        timer_id = self.timer_manager.set_timer(
+                            duration_seconds=duration,
+                            name=self.wellness_trigger.break_timer_name,
+                            timer_type=TimerManager.TIMER_TYPE_WELLNESS,
+                        )
+                        if self.aurabot.get_sitting_timer_state() == "active":
+                            was_active = self.aurabot.pause_sitting_timer()
+                            if was_active and self.logger:
+                                self.logger.log_wellness(
+                                    "Session timer paused for wellness break (user left desk)",
+                                    "INFO",
+                                    metadata={"timer_id": timer_id},
+                                )
+                        if self.logger:
+                            self.logger.log_wellness(
+                                "Wellness timer started after confirmed absence",
+                                "INFO",
+                                metadata={"timer_id": timer_id, "duration_seconds": duration},
+                            )
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.log_error(f"Error creating deferred wellness timer: {e}")
+
+                    # Clear pending break and reset violations to reward compliance.
+                    self._pending_break = False
+                    self._pending_break_prompt_time = None
+                    if self._break_violation_count > 0 and self.logger:
+                        self.logger.log_wellness(
+                            "User left desk after wellness prompt; resetting violation counter",
+                            "INFO",
+                            metadata={"previous_violation_count": self._break_violation_count},
+                        )
+                    self._break_violation_count = 0
+                else:
+                    # User is still present; if they stay too long after the prompt,
+                    # record a violation and potentially trigger the hit action.
+                    if (
+                        self._pending_break_prompt_time is not None
+                        and now - self._pending_break_prompt_time >= self._break_leave_grace_seconds
+                        and is_present
+                    ):
+                        self._record_break_violation()
+                        # This pending break has been fully handled.
+                        self._pending_break = False
+                        self._pending_break_prompt_time = None
+            # Case 2: user previously left and a wellness break started, but they
+            # returned early and we paused the break. When they leave again,
+            # resume the remaining break time.
+            elif (
+                self._paused_wellness_remaining is not None
+                and previous_presence is not False
+                and not is_present
+            ):
+                remaining = max(0.0, self._paused_wellness_remaining)
+                if remaining > 0:
+                    try:
+                        timer_id = self.timer_manager.set_timer(
+                            duration_seconds=int(remaining),
+                            name=self.wellness_trigger.break_timer_name,
+                            timer_type=TimerManager.TIMER_TYPE_WELLNESS,
+                        )
+                        if self.aurabot.get_sitting_timer_state() == "active":
+                            was_active = self.aurabot.pause_sitting_timer()
+                            if was_active and self.logger:
+                                self.logger.log_wellness(
+                                    "Session timer paused to resume wellness break (user left again)",
+                                    "INFO",
+                                    metadata={"timer_id": timer_id, "remaining_seconds": remaining},
+                                )
+                        if self.logger:
+                            self.logger.log_wellness(
+                                "Wellness timer resumed after user left again",
+                                "INFO",
+                                metadata={"timer_id": timer_id, "remaining_seconds": remaining},
+                            )
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.log_error(f"Error resuming wellness timer: {e}")
+                self._paused_wellness_remaining = None
+        
         # Debounce logic: track consecutive readings before changing state
         if is_present:
             # Only increment counter if wellness timer is NOT active
@@ -325,7 +484,7 @@ class MQTTAPI:
             # Only trigger state change if we have enough consecutive present readings
             # AND no wellness timer is active (user must complete break first)
             if (self._consecutive_present_count >= self._presence_stable_count and 
-                not wellness_timer_active):
+                not effective_wellness_active):
                 # Check if starting a new session (from IDLE state)
                 session_state_before = self.aurabot.get_sitting_timer_state()
                 was_idle = self.aurabot.start_sitting_timer()
@@ -351,13 +510,30 @@ class MQTTAPI:
                 # Resume wellness timer monitoring if user returned (from paused state)
                 if session_state_before == "paused":
                     self.wellness_trigger.resume_monitoring()
-            elif wellness_timer_active:
-                # User is present but wellness timer is active - don't resume session
-                # Counter is not incremented during break, so we'll need fresh readings after break ends
+            elif effective_wellness_active:
+                # User is present while a wellness break is active or paused:
+                # either hold or pause the break so they still owe the full
+                # break duration before a new sitting session can begin.
+                if wellness_timer_active:
+                    # Pause the active wellness timer and remember remaining time.
+                    first = active_wellness_timers[0]
+                    remaining = float(first.get("time_remaining", 0.0))
+                    self._paused_wellness_remaining = max(0.0, remaining)
+                    timer_id = first.get("id")
+                    if timer_id:
+                        self.timer_manager.cancel_timer(timer_id=timer_id)
+                    if self.logger:
+                        self.logger.log_wellness(
+                            "Wellness break paused because user returned early",
+                            "INFO",
+                            metadata={"remaining_seconds": self._paused_wellness_remaining},
+                        )
+                # Counter is not incremented toward session start while the
+                # user still owes a wellness break.
                 response["actions"].append("session_held_for_wellness_break")
                 if self.logger and not self._wellness_hold_logged:
                     self.logger.log_wellness(
-                        "Session resume blocked: wellness break active",
+                        "Session resume blocked: wellness break active or paused",
                         "INFO",
                         metadata={"presence_stable_count": self._presence_stable_count}
                     )
@@ -696,7 +872,25 @@ class MQTTAPI:
             "tts": {
                 "last_ack": self._last_tts_ack,
                 "last_ack_age_seconds": tts_ack_age_seconds
-            }
+            },
+            "break_compliance": self.get_break_compliance_status(),
+        }
+    
+    def get_break_compliance_status(self) -> dict:
+        """
+        Return current break-compliance configuration and runtime state.
+        """
+        return {
+            "enabled": self._break_compliance_enabled,
+            "break_leave_grace_seconds": self._break_leave_grace_seconds,
+            "max_break_violations_before_hit": self._max_break_violations_before_hit,
+            "hit_action": self._hit_action,
+            "hit_cooldown_seconds": self._hit_cooldown_seconds,
+            "violation_count": self._break_violation_count,
+            "pending_break": self._pending_break,
+            "pending_break_prompt_time": self._pending_break_prompt_time,
+            "last_hit_time": self._last_hit_time,
+            "paused_wellness_remaining_seconds": self._paused_wellness_remaining,
         }
     
     def _validate_sensor_data(self, data: dict) -> bool:
@@ -813,3 +1007,82 @@ class MQTTAPI:
             "presence_stable_count": self._presence_stable_count,
             "absence_stable_count": self._absence_stable_count
         }
+
+    def _record_break_violation(self) -> None:
+        """
+        Increment break violation count and, when threshold is reached, trigger
+        the configured physical hit action via ESP32 movement.
+        """
+        self._break_violation_count += 1
+        if self.logger:
+            self.logger.log_wellness(
+                "User remained at desk after wellness prompt; recording break violation",
+                "WARNING",
+                metadata={
+                    "violation_count": self._break_violation_count,
+                    "max_before_hit": self._max_break_violations_before_hit,
+                },
+            )
+        if self._break_violation_count >= self._max_break_violations_before_hit:
+            self._trigger_break_hit()
+
+    def _trigger_break_hit(self) -> None:
+        """
+        Trigger the configured physical hit action via ESP32, with safety
+        checks and cooldown to avoid spamming movement.
+        """
+        now = time.time()
+        # Cooldown: avoid repeated hits in a short period
+        if (
+            self._last_hit_time is not None
+            and now - self._last_hit_time < self._hit_cooldown_seconds
+        ):
+            return
+
+        mqtt = getattr(self.aurabot, "mqtt_integration", None)
+        if not mqtt or not mqtt.is_connected():
+            if self.logger:
+                self.logger.log_wellness(
+                    "Break hit skipped: MQTT not connected",
+                    "INFO",
+                )
+            return
+
+        if not self.is_esp32_user_control_enabled():
+            if self.logger:
+                self.logger.log_wellness(
+                    "Break hit skipped: ESP32 user control not enabled",
+                    "INFO",
+                )
+            return
+
+        action = (self._hit_action or "swing").strip().lower()
+        payload = {"cmd": "move", "action": action}
+        published = mqtt.publish(
+            "aurabot/control",
+            payload,
+            qos=1,
+            retain=False,
+        )
+        if published:
+            self._last_hit_time = now
+            # Reset violation count after a successful hit so the user gets
+            # another N chances before the next hit.
+            previous_count = self._break_violation_count
+            self._break_violation_count = 0
+            if self.logger:
+                self.logger.log_wellness(
+                    "Break hit triggered via ESP32 movement",
+                    "WARNING",
+                    metadata={
+                        "action": action,
+                        "previous_violation_count": previous_count,
+                    },
+                )
+        else:
+            if self.logger:
+                self.logger.log_wellness(
+                    "Break hit failed: MQTT publish error",
+                    "ERROR",
+                    metadata={"action": action},
+                )

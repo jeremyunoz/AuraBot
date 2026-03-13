@@ -36,7 +36,8 @@ class WellnessTimerTrigger:
                  pause_timeout_seconds: Optional[int] = None,
                  on_wellness_timer_created: Optional[Callable] = None,
                  on_pause_timeout: Optional[Callable] = None,
-                 logger: Optional[AuraBotLogger] = None):
+                 logger: Optional[AuraBotLogger] = None,
+                 create_timer_immediately: bool = True):
         """
         Initialize the WellnessTimerTrigger.
         
@@ -56,6 +57,10 @@ class WellnessTimerTrigger:
         self.tts_engine = tts_engine
         self.on_wellness_timer_created = on_wellness_timer_created
         self.logger = logger
+        # When False, reaching the sitting threshold will only signal that a
+        # wellness break is due; responsibility for creating the actual timer
+        # (and pausing the session) is delegated to higher-level policy code.
+        self.create_timer_immediately = create_timer_immediately
         
         self.sitting_threshold_seconds = (
             sitting_threshold_seconds or self.DEFAULT_SITTING_THRESHOLD_SECONDS
@@ -121,6 +126,25 @@ class WellnessTimerTrigger:
             if session_time_seconds < next_trigger_threshold:
                 return None
             
+            # Record when we triggered this threshold (based on session time)
+            # This ensures we wait for another full threshold period before next trigger
+            self._last_trigger_session_time = session_time_seconds
+
+            # If we are not creating the timer immediately, simply notify the
+            # callback and return. Higher-level policy (e.g. MQTTAPI) is
+            # responsible for starting the actual break countdown once the user
+            # has left the desk.
+            if not self.create_timer_immediately:
+                if self.on_wellness_timer_created:
+                    try:
+                        self.on_wellness_timer_created()
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.log_error(f"Error in wellness timer created callback: {e}")
+                        else:
+                            print(f"Error in wellness timer created callback: {e}")
+                return None
+
             # Check if wellness timer already exists (prevent duplicates)
             active_wellness_timers = self.timer_manager.get_active_timers(
                 timer_type=TimerManager.TIMER_TYPE_WELLNESS
@@ -163,10 +187,6 @@ class WellnessTimerTrigger:
                             self.logger.log_error(f"Error in wellness timer created callback: {e}")
                         else:
                             print(f"Error in wellness timer created callback: {e}")
-                
-                # Record when we triggered this timer (based on session time)
-                # This ensures we wait for another full threshold period before next trigger
-                self._last_trigger_session_time = session_time_seconds
                 
                 # Announce via TTS (prefer voice WebSocket → ESP32 speaker)
                 try:

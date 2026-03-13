@@ -120,6 +120,7 @@ function updateTimers(data) {
 // Update wellness config display
 function updateWellnessConfig(data) {
     const config = data.wellness_config || {};
+    const compliance = data.break_compliance || {};
     
     const threshold = config.sitting_threshold_seconds || 0;
     const duration = config.break_duration_seconds || 0;
@@ -130,6 +131,37 @@ function updateWellnessConfig(data) {
     document.getElementById('wellness-duration').textContent = 
         duration > 0 ? formatTime(duration) : '-';
     document.getElementById('wellness-name').textContent = name;
+
+    // Show current wellness break state (pending / active / paused).
+    const stateEl = document.getElementById('wellness-state');
+    const remainingEl = document.getElementById('wellness-remaining');
+    if (!stateEl || !remainingEl) return;
+
+    const hasActiveWellnessTimer = (data.timers?.active_timers || []).some(
+        t => t.type === 'wellness'
+    );
+    const pendingBreak = Boolean(compliance.pending_break);
+    const pausedRemaining = Number(compliance.paused_wellness_remaining_seconds ?? 0);
+
+    let stateLabel = 'None';
+    let remainingSeconds = 0;
+
+    if (hasActiveWellnessTimer) {
+        stateLabel = 'Active';
+        const activeWellness = (data.timers?.active_timers || []).find(
+            t => t.type === 'wellness'
+        );
+        remainingSeconds = activeWellness ? activeWellness.time_remaining : 0;
+    } else if (pausedRemaining > 0) {
+        stateLabel = 'Paused';
+        remainingSeconds = pausedRemaining;
+    } else if (pendingBreak) {
+        stateLabel = 'Pending (waiting for you to leave)';
+        remainingSeconds = duration;
+    }
+
+    stateEl.textContent = stateLabel;
+    remainingEl.textContent = remainingSeconds > 0 ? formatTime(remainingSeconds) : '-';
 }
 
 // Update MQTT status

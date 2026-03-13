@@ -113,6 +113,9 @@ def _build_status(bot) -> dict:
 
     if bot.mqtt_api and bot.mqtt_api.wellness_trigger:
         out["wellness_config"] = bot.mqtt_api.wellness_trigger.get_config()
+        # Surface break-compliance configuration and state when available.
+        if hasattr(bot.mqtt_api, "get_break_compliance_status"):
+            out["break_compliance"] = bot.mqtt_api.get_break_compliance_status()
     if bot.mqtt_integration:
         out["mqtt_connected"] = bot.mqtt_integration.is_connected()
     else:

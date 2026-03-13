@@ -92,6 +92,14 @@
                         <span class="label">Break Timer Name:</span>
                         <span id="wellness-name" class="value">-</span>
                     </div>
+                    <div class="info-row">
+                        <span class="label">Wellness Break State:</span>
+                        <span id="wellness-state" class="value">None</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">Wellness Time Remaining:</span>
+                        <span id="wellness-remaining" class="value">-</span>
+                    </div>
                 </div>
                 <div class="controls" style="margin-top: 16px;">
                     <button id="btn-trigger-wellness" class="btn btn-wellness">Test Wellness Reminder</button>
@@ -108,6 +116,7 @@
         </main>
     </div>
 
-    <script src="/static/app.js?v=20260311c"></script>
+    <!-- Bump version to ensure browsers fetch latest dashboard logic -->
+    <script src="/static/app.js?v=20260312a"></script>
 </body>
 </html>
