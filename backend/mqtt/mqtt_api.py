@@ -65,6 +65,10 @@ class MQTTAPI:
         # simultaneously log "remained at desk" and "user left" on sensor jitter.
         self._last_stable_presence_state: Optional[bool] = None
         self._last_hit_time: Optional[float] = None
+        # If True, we previously triggered a hit movement (e.g. swing) and
+        # should request the robot returns to a neutral stand posture once the
+        # user actually leaves the desk.
+        self._pending_stand_reset_after_hit: bool = False
         # Remaining wellness break time when user returns early (paused break).
         self._paused_wellness_remaining: Optional[float] = None
         # Cooldown between hits to avoid spamming movement.
@@ -505,6 +509,18 @@ class MQTTAPI:
             if stable_state is not None:
                 self._last_stable_presence_state = stable_state
 
+            # If we previously triggered a physical hit (e.g. swing) and the user
+            # has now actually left (stable absence), command the robot back to
+            # a neutral stand posture.
+            if (
+                self._pending_stand_reset_after_hit
+                and stable_state is not None
+                and previous_stable is not False
+                and stable_state is False
+            ):
+                if self._request_robot_stand():
+                    self._pending_stand_reset_after_hit = False
+
             # Case 1: new wellness break requested, waiting for first stable absence.
             if self._pending_break and stable_state is not None:
                 if previous_stable is not False and stable_state is False:
@@ -516,6 +532,8 @@ class MQTTAPI:
                             name=self.wellness_trigger.break_timer_name,
                             timer_type=TimerManager.TIMER_TYPE_WELLNESS,
                         )
+                        # Break is now active; request the robot rests/relaxes.
+                        self._request_robot_lay_down()
                         if self.aurabot.get_sitting_timer_state() == "active":
                             was_active = self.aurabot.pause_sitting_timer()
                             if was_active and self.logger:
@@ -573,6 +591,8 @@ class MQTTAPI:
                             name=self.wellness_trigger.break_timer_name,
                             timer_type=TimerManager.TIMER_TYPE_WELLNESS,
                         )
+                        # Break is now active again; request rest posture.
+                        self._request_robot_lay_down()
                         if self.aurabot.get_sitting_timer_state() == "active":
                             was_active = self.aurabot.pause_sitting_timer()
                             if was_active and self.logger:
@@ -1092,6 +1112,9 @@ class MQTTAPI:
         )
         if published:
             self._last_hit_time = now
+            # Once we've moved the robot for enforcement, ensure we return to a
+            # neutral posture when the user actually leaves.
+            self._pending_stand_reset_after_hit = True
             # Reset violation count after a successful hit so the user gets
             # another N chances before the next hit.
             previous_count = self._break_violation_count
@@ -1112,3 +1135,59 @@ class MQTTAPI:
                     "ERROR",
                     metadata={"action": action},
                 )
+
+    def _request_robot_stand(self) -> bool:
+        """
+        Request the robot returns to stand posture.
+
+        Returns:
+            bool: True if a stand command was published, False otherwise.
+        """
+        mqtt = getattr(self.aurabot, "mqtt_integration", None)
+        if not mqtt or not mqtt.is_connected():
+            return False
+
+        # Use the same safety gate as other user-control movement commands.
+        if not self.is_esp32_user_control_enabled():
+            return False
+
+        published = mqtt.publish(
+            "aurabot/control",
+            {"cmd": "move", "action": "stand"},
+            qos=1,
+            retain=False,
+        )
+        if published and self.logger:
+            self.logger.log_wellness(
+                "User left after enforcement; requesting robot stand posture",
+                "INFO",
+            )
+        return bool(published)
+
+    def _request_robot_lay_down(self) -> bool:
+        """
+        Request the robot moves into a lying-down posture during breaks.
+
+        Returns:
+            bool: True if a lay_down command was published, False otherwise.
+        """
+        mqtt = getattr(self.aurabot, "mqtt_integration", None)
+        if not mqtt or not mqtt.is_connected():
+            return False
+
+        # Use the same safety gate as other movement commands.
+        if not self.is_esp32_user_control_enabled():
+            return False
+
+        published = mqtt.publish(
+            "aurabot/control",
+            {"cmd": "move", "action": "lay_down"},
+            qos=1,
+            retain=False,
+        )
+        if published and self.logger:
+            self.logger.log_wellness(
+                "Wellness break active; requesting robot lay_down posture",
+                "INFO",
+            )
+        return bool(published)
