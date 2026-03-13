@@ -241,20 +241,27 @@ class TimerManager:
         else:
             notification = self.DEFAULT_NOTIFICATION_MESSAGE
         
-        # Speak notification via voice WebSocket (ESP32 speaker) when available,
-        # otherwise fall back to self.tts_engine.speak() (local espeak / MQTT).
+        # Speak notification via voice WebSocket (ESP32 speaker) when available.
+        # For wellness timers we intentionally do NOT fall back to MQTT/text-based
+        # TTS – wellness alarms must be delivered as voice frames only. For
+        # user timers we keep the existing fallback to self.tts_engine.speak().
         try:
             spoken = False
             try:
-                from backend.voice.voice_ws_server import is_voice_client_connected, enqueue_tts_text
+                from backend.voice.voice_ws_server import (
+                    is_voice_client_connected,
+                    enqueue_tts_text,
+                )
                 if is_voice_client_connected() and enqueue_tts_text(notification):
                     spoken = True
             except ImportError:
-                pass
-            if not spoken:
+                # Voice WebSocket stack not available; fallbacks handled below.
+                spoken = False
+
+            if not spoken and timer_type != self.TIMER_TYPE_WELLNESS:
                 self.tts_engine.speak(notification)
         except Exception as e:
-            if hasattr(self.logger, 'log_error'):
+            if hasattr(self.logger, "log_error"):
                 self.logger.log_error(f"Error speaking timer notification: {e}")
             else:
                 print(f"Error speaking timer notification: {e}")

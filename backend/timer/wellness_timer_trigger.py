@@ -188,7 +188,7 @@ class WellnessTimerTrigger:
                         else:
                             print(f"Error in wellness timer created callback: {e}")
                 
-                # Announce via TTS (prefer voice WebSocket → ESP32 speaker)
+                # Announce via TTS (voice WebSocket → ESP32 speaker only)
                 try:
                     hours = int(session_time_seconds // 3600)
                     minutes = int((session_time_seconds % 3600) // 60)
@@ -205,13 +205,20 @@ class WellnessTimerTrigger:
                     )
                     spoken = False
                     try:
-                        from backend.voice.voice_ws_server import is_voice_client_connected, enqueue_tts_text
+                        from backend.voice.voice_ws_server import (
+                            is_voice_client_connected,
+                            enqueue_tts_text,
+                        )
                         if is_voice_client_connected() and enqueue_tts_text(message):
                             spoken = True
                     except ImportError:
-                        pass
-                    if not spoken and self.tts_engine:
-                        self.tts_engine.speak(message)
+                        # Voice WebSocket stack not available; skip MQTT/text fallbacks
+                        spoken = False
+
+                    # Intentionally do NOT fall back to MQTT/text-based TTS here.
+                    # Wellness break alarms should be delivered as voice frames over
+                    # the voice WebSocket only. If no voice client is connected,
+                    # we simply log the event without triggering local/MQTT TTS.
                     if self.logger:
                         self.logger.log_wellness(
                             f"Wellness timer created: {message}",
