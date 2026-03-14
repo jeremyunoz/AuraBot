@@ -50,7 +50,7 @@ class MQTTAPI:
         self._break_compliance_enabled: bool = True
         # Number of seconds after a wellness prompt during which the user is
         # expected to leave before a violation is counted.
-        self._break_leave_grace_seconds: float = 10.0
+        self._break_leave_grace_seconds: float = 30.0
         # How many ignored breaks before triggering the physical hit.
         self._max_break_violations_before_hit: int = 3
         # ESP32 movement action to use for the hit.
