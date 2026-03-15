@@ -231,34 +231,45 @@ static inline int lerp_snap(int current, int target) {
      }
  }
  
- /* 👀 "> <" line eyes – dir=1 draws ">", dir=-1 draws "<"                     */
- static void draw_greet_on_canvas(lv_obj_t *canvas, int dir) {
-     lv_canvas_fill_bg(canvas, BG_COLOR, LV_OPA_COVER);
-     lv_color_t c = EYE_COLOR;
-     int mid_y          = GREET_H / 2;
-    int line_thickness = 6;
- 
-     for (int py = 0; py < GREET_H; py++) {
-         int x_tip  = (dir == 1) ? GREET_W - 1 : 0;
-         int x_open = (dir == 1) ? 0           : GREET_W - 1;
-         int x_line;
- 
-         if (py <= mid_y) {
-             float ratio = (mid_y > 0) ? (float)py / mid_y : 1.0f;
-             x_line = (int)(x_open + ratio * (x_tip - x_open));
-         } else {
-             float ratio = (float)(py - mid_y) / (GREET_H - 1 - mid_y);
-             x_line = (int)(x_tip + ratio * (x_open - x_tip));
-         }
- 
-         for (int t = -line_thickness / 2; t <= line_thickness / 2; t++) {
-             int px = x_line + t;
-             if (px >= 0 && px < GREET_W) {
-                 lv_canvas_set_px(canvas, px, py, c, LV_OPA_COVER);
-             }
-         }
-     }
- }
+/* 👀 Chevron line eyes – dir=1 draws ">", dir=-1 draws "<"                   */
+static void draw_greet_on_canvas(lv_obj_t *canvas, int dir) {
+    lv_canvas_fill_bg(canvas, BG_COLOR, LV_OPA_COVER);
+    const lv_color_t c = EYE_COLOR;
+    const int line_thickness = 7;
+    const int half_thickness = line_thickness / 2;
+    const int inset_x = half_thickness + 2;
+    const int inset_y = half_thickness + 2;
+    const int y_top = inset_y;
+    const int y_mid = GREET_H / 2;
+    const int y_bottom = GREET_H - 1 - inset_y;
+    const int x_open = (dir == 1) ? inset_x : GREET_W - 1 - inset_x;
+    const int x_tip = (dir == 1) ? GREET_W - 1 - inset_x : inset_x;
+
+    for (int py = y_top; py <= y_bottom; py++) {
+        int x_line;
+
+        if (py <= y_mid) {
+            int den = y_mid - y_top;
+            int num = py - y_top;
+            x_line = (den > 0)
+                     ? x_open + ((x_tip - x_open) * num + den / 2) / den
+                     : x_tip;
+        } else {
+            int den = y_bottom - y_mid;
+            int num = py - y_mid;
+            x_line = (den > 0)
+                     ? x_tip + ((x_open - x_tip) * num + den / 2) / den
+                     : x_open;
+        }
+
+        for (int t = -half_thickness; t <= half_thickness; t++) {
+            int px = x_line + t;
+            if (px >= 0 && px < GREET_W) {
+                lv_canvas_set_px(canvas, px, py, c, LV_OPA_COVER);
+            }
+        }
+    }
+}
  
  /* 💤 Sleep – single thick horizontal line centred in the canvas              */
  static void draw_sleep_on_canvas(lv_obj_t *canvas) {
@@ -693,6 +704,8 @@ static void reset_all_effects(void) {
     roboeyes_set_curious(false);
     roboeyes_set_h_flicker(false, 0);
     roboeyes_set_v_flicker(false, 0);
+    eyes.h_flicker_alternate = false;
+    eyes.v_flicker_alternate = false;
     eyes.blink_in_progress = false;
     eyes.laugh             = false;
 }
@@ -744,8 +757,6 @@ static void reset_all_effects(void) {
                 roboeyes_set_position(POS_CENTER);
                 roboeyes_open();
                 roboeyes_set_mood(MOOD_GREET);
-                /* Slight horizontal curiosity wiggle */
-                roboeyes_set_h_flicker(true, 2);
                 /* Random gaze every 2-4 s */
                 // roboeyes_set_idle(true, 2, 2);
                 break;
