@@ -1,55 +1,38 @@
 # Vision Module
 
-Real-time person detection for Raspberry Pi, with two model targets:
+Person detection for Raspberry Pi: NCNN (on-device in this repo) or IMX export for Raspberry Pi AI Camera (Sony IMX500) on-sensor inference.
 
-- `NCNN` for on-device inference in this project (`object_detection.py`)
-- `IMX` for Raspberry Pi AI Camera (Sony IMX500) export (`.rpk`)
+## Capture backends
 
-## Workflow A: NCNN runtime for this project
+- **IMX** — Pi AI Camera + aitrios modlib; on-sensor YOLO (preferred when model and stack available).
+- **picamera2** — libcamera on Pi; frames to CPU YOLO (NCNN or Ultralytics).
+- **opencv** — V4L2; CPU YOLO.
 
-Use this when you want AuraBot camera detection running through `object_detection.py`.
+`--capture auto` chooses imx → picamera2 → opencv in that order.
 
-### 1. Install runtime dependencies
+## Workflow A: NCNN (this project)
 
-From project root:
+For detection via `object_detection.py` using NCNN.
 
 ```bash
 pip install -r requirements.txt
-```
-
-### 2. Export/download NCNN model (first time)
-
-```bash
 cd backend/vision
-python setup_model.py
+python setup_model.py    # creates yolo26n_ncnn_model/
+python check_cameras.py
+python object_detection.py --capture auto
 ```
 
-This creates `yolo26n_ncnn_model/`.
-
-### 3. Run detection
-
-From project root:
+Overrides:
 
 ```bash
-python backend/vision/check_cameras.py
-python backend/vision/object_detection.py --capture auto
+python object_detection.py --capture picamera2
+python object_detection.py --capture opencv --device /dev/video0
+python object_detection.py --capture imx --imx-model-dir yolo11n_imx_model
 ```
 
-`--capture auto` prefers the Raspberry Pi AI Camera (`imx`) when available, then `picamera2`, then OpenCV.
+## Workflow B: IMX export only
 
-Useful overrides:
-
-```bash
-python backend/vision/object_detection.py --capture picamera2
-python backend/vision/object_detection.py --capture opencv --device /dev/video0
-python backend/vision/object_detection.py --capture imx --imx-model-dir yolo11n_imx_model
-```
-
-## Workflow B: IMX export for Raspberry Pi AI Camera
-
-Use this when you only need model export to IMX500 `.rpk` (not full project runtime install).
-
-From project root:
+Export YOLO to IMX500 `.rpk`; no full project runtime.
 
 ```bash
 ./scripts/setup_pi_venv.sh .venv
@@ -57,43 +40,42 @@ source .venv/bin/activate
 python backend/vision/setup_imx_model.py --model yolo11n.pt --imgsz 640
 ```
 
-Detailed setup/deploy notes: `backend/vision/IMX_PI_AI_CAMERA_SETUP.md`.
+See `IMX_PI_AI_CAMERA_SETUP.md` for deploy and runtime.
 
-## Workflow C: Run AuraBot with vision enabled
-
-From project root:
+## Workflow C: AuraBot with vision
 
 ```bash
 ENABLE_VISION=true ./scripts/run_backend_imx.sh
 ```
 
-This launcher sets `MODLIB_LIBCAMERA=LOCAL`, prepends `/usr/local/lib/aarch64-linux-gnu` to `LD_LIBRARY_PATH`, and prepends `/usr/local/lib/python3/dist-packages` to `PYTHONPATH` before Python starts. On Pi systems with a newer `/usr/local` libcamera install, both are required so the shared libraries and Python bindings come from the same stack.
+Launcher sets `MODLIB_LIBCAMERA=LOCAL`, and prepends `/usr/local/lib/aarch64-linux-gnu` to `LD_LIBRARY_PATH` and `/usr/local/lib/python3/dist-packages` to `PYTHONPATH` so libcamera and modlib use the same stack.
 
-Relevant environment variables:
+Env (e.g. in `backend/.env`):
+
+| Env | Description |
+|-----|-------------|
+| `VISION_CAPTURE` | `auto` \| `imx` \| `picamera2` \| `opencv` |
+| `VISION_IMX_MODEL_DIR` | IMX model dir under backend/vision (e.g. `yolo11n_imx_model`) |
+| `VISION_MODEL` | NCNN model dir (e.g. `yolo26n_ncnn_model`) |
+| `VISION_FALLBACK_MODEL` | Fallback YOLO weights (e.g. `yolo26n.pt`) |
+| `VISION_WARMUP_FRAMES`, `VISION_READ_RETRIES`, `VISION_REPORT_INTERVAL_FRAMES` | Runtime tuning |
+
+## Benchmarks
+
+Shared options and logging in `benchmark_common.py`. Run from project root.
+
+**NCNN / CPU path (synthetic or camera):**
 
 ```bash
-VISION_CAPTURE=auto|imx|picamera2|opencv
-VISION_IMX_MODEL_DIR=yolo11n_imx_model
-VISION_MODEL=yolo26n_ncnn_model
-VISION_FALLBACK_MODEL=yolo26n.pt
-VISION_WARMUP_FRAMES=10
-VISION_READ_RETRIES=50
-VISION_REPORT_INTERVAL_FRAMES=15
-```
-
-## Benchmark (NCNN runtime path)
-
-Measure YOLO inference latency from project root:
-
-```bash
-# Synthetic frame (no camera)
 python -m backend.vision.benchmark_yolo_latency --warmup 10 --runs 50
-
-# Live camera
 python -m backend.vision.benchmark_yolo_latency --camera --warmup 5 --runs 30
-
-# Mean ms + FPS only
 python -m backend.vision.benchmark_yolo_latency --quiet
 ```
 
-`benchmark_yolo_latency.py` imports `object_detection.py`, which now prefers `/usr/local/lib/python3/dist-packages` automatically when present so direct benchmark runs pick up the newer Python `libcamera` binding too.
+**IMX path (Pi AI Camera + on-sensor inference):**
+
+```bash
+python -m backend.vision.benchmark_imx_latency [options]
+```
+
+Requires: imx500-all (apt), aitrios modlib (pip), and IMX model dir with `packerOut.zip` and `labels.txt`.

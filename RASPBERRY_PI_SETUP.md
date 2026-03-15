@@ -1,10 +1,10 @@
-# Raspberry Pi 5 Setup Guide for AuraBot
+# Raspberry Pi 5 Setup for AuraBot
 
-This guide covers audio capture only. Audio output is handled by the ESP32.
+Backend runs on the Pi: voice WebSocket server (ASR/LLM/TTS), dashboard, optional MQTT, PIR GPIO, and vision. TTS on Pi uses espeak-ng (or gTTS if configured). Voice input is typically from ESP32 over WebSocket; optional local mic uses the packages below.
 
-## Required System Dependencies (Audio Capture Only)
+## System dependencies
 
-Install the following packages on your Raspberry Pi 5 for audio capture:
+**Audio (capture and TTS):**
 
 ```bash
 sudo apt-get update
@@ -12,101 +12,79 @@ sudo apt-get install -y \
     flac \
     alsa-utils \
     portaudio19-dev \
-    python3-pyaudio
+    python3-pyaudio \
+    espeak-ng
 ```
 
-## What Each Package Does
+| Package | Purpose |
+|---------|--------|
+| flac | Required by speech_recognition for Google API |
+| alsa-utils | arecord, device management |
+| portaudio19-dev | PyAudio build |
+| python3-pyaudio | PyAudio bindings |
+| espeak-ng | TTS on Pi (default when no gTTS) |
 
-- **flac**: Audio codec required by speech_recognition library for Google API
-- **alsa-utils**: Audio utilities (arecord) for audio capture device management
-- **portaudio19-dev**: Development headers for PyAudio
-- **python3-pyaudio**: Python bindings for audio I/O
+**Optional — vision (Pi AI Camera / libcamera):**  
+See [backend/vision/README.md](backend/vision/README.md) and [backend/vision/IMX_PI_AI_CAMERA_SETUP.md](backend/vision/IMX_PI_AI_CAMERA_SETUP.md). For IMX on-sensor inference: `sudo apt install imx500-all`, aitrios modlib (pip), and use `run_backend_imx.sh` so libcamera comes from `/usr/local`.
 
-## Installation Steps
+## Installation
 
-1. **Install system dependencies (audio capture only):**
+1. **System packages (above).**
+
+2. **Python deps (from project root):**
    ```bash
-   sudo apt-get update
-   sudo apt-get install -y flac alsa-utils portaudio19-dev python3-pyaudio
-   ```
-
-2. **Install Python dependencies:**
-   ```bash
-   cd /home/jzunoz/projects/AuraBot
-   source venv/bin/activate  # if using virtual environment
+   cd /path/to/AuraBot
+   python3 -m venv aurabot-env
+   source aurabot-env/bin/activate
    pip install -r requirements.txt
    ```
 
-3. **Verify audio capture device:**
-   ```bash
-   # List audio capture devices
-   arecord -l
-   
-   # Test recording (3 seconds)
-   arecord -d 3 test.wav
-   ```
+3. **Config:** Copy or edit `backend/.env` (MQTT, `ENABLE_PIR_GPIO`, `ENABLE_VISION`, LLM, etc.). See root [README.md](README.md) env table.
 
-4. **Check audio permissions:**
-   ```bash
-   # Add user to audio group (if not already)
-   sudo usermod -a -G audio $USER
-   # Logout and login again for changes to take effect
-   ```
+4. **Audio (optional local mic):** Ensure user is in `audio` group:  
+   `sudo usermod -a -G audio $USER` then log out and back in.  
+   List devices: `arecord -l`. Test: `arecord -d 3 test.wav`.
+
+## Running
+
+From **project root**:
+
+```bash
+source aurabot-env/bin/activate
+python -m backend
+```
+
+- Dashboard: http://localhost:8000 (or `DASHBOARD_PORT`).
+- Voice WebSocket: `ws://<pi-ip>:8765/voice` (or `VOICE_WS_PORT`).
+
+**With IMX AI camera (libcamera from /usr/local):**
+
+```bash
+ENABLE_VISION=true ./scripts/run_backend_imx.sh
+```
+
+**Local PIR + vision, no MQTT:**
+
+```bash
+ENABLE_MQTT=false ENABLE_PIR_GPIO=true ENABLE_VISION=true python -m backend
+```
 
 ## Troubleshooting
 
-### ALSA/JACK Warnings - What Causes Them?
+**ALSA/JACK warnings**  
+From PyAudio probing backends and non‑existent ALSA devices. Harmless; `stt.py` suppresses them during capture where possible.
 
-**Root Cause:**
-These warnings come from **PyAudio's initialization process**, not your code. When PyAudio initializes, it:
+**FLAC:** `OSError: FLAC conversion utility not available` → `sudo apt-get install flac`.
 
-1. **Probes all audio backends** - ALSA, JACK, OSS, PulseAudio, etc.
-2. **Tries to open various device configurations** - The ALSA config files reference many device types (front, rear, surround, etc.) that don't exist on Raspberry Pi
-3. **Attempts to connect to JACK server** - JACK is a professional audio server that's not running on most Pi setups
+**No audio capture:** `arecord -l`; `arecord -d 3 test.wav`; confirm user in `audio` group.
 
-**Why They Appear:**
-- ALSA configuration files (`/usr/share/alsa/alsa.conf`) define many audio device types for desktop systems
-- Raspberry Pi typically only has basic audio hardware (HDMI or 3.5mm jack)
-- PyAudio tries each configuration and ALSA reports "Unknown PCM" for devices that don't exist
-- These are **informational warnings**, not errors
-
-**The Code Now Suppresses Them:**
-The updated `stt.py` suppresses these warnings during audio capture initialization and recording, so you'll see cleaner output. The warnings are harmless and don't affect functionality.
-
-### JACK Warnings
-JACK server warnings are also **harmless** if you're not using JACK audio. PyAudio is just checking for available backends.
-
-### FLAC Error
-If you see: `OSError: FLAC conversion utility not available`
-- Install FLAC: `sudo apt-get install flac`
-
-### Audio Capture Device Not Working
-1. Check if the capture device is detected: `arecord -l`
-2. Test recording: `arecord -d 3 test.wav`
-3. Check permissions: `groups` (should include 'audio')
-4. If needed: `sudo usermod -a -G audio $USER` (then logout/login)
-
-### MQTT Connection Errors
-MQTT "Not authorized" errors mean the broker requires authentication. Use the same credentials as the backend (from `backend/.env`):
-
-- **`mosquitto_pub`**: Pass `-u <MQTT_USERNAME>` and `-P <MQTT_PASSWORD>`:
-  ```bash
-  mosquitto_pub -h localhost -t "aurabot/sensors" -m '{"motion": 1, "camera_confirmed": 1}' -u user -P YOUR_PASSWORD
-  ```
-  Replace `user` and `YOUR_PASSWORD` with your `MQTT_USERNAME` and `MQTT_PASSWORD` from `.env`.
-
-- **Backend**: Reads `MQTT_USERNAME` and `MQTT_PASSWORD` from `backend/.env` automatically.
-
-## Running AuraBot
+**MQTT "Not authorized"**  
+Broker requires auth. Use same credentials as in `backend/.env`:
 
 ```bash
-cd /home/jzunoz/projects/AuraBot/backend
-python3 sim_loop.py
-# Or from project root: python3 -m backend
+mosquitto_pub -h localhost -t "aurabot/sensors" -m '{"motion":1}' -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD"
 ```
 
-The application will automatically:
-- Use espeak-ng for TTS on Raspberry Pi
-- Check for required dependencies on startup
-- Provide helpful error messages if something is missing
+Backend reads `MQTT_USERNAME` and `MQTT_PASSWORD` from `backend/.env` automatically.
 
+**Vision / libcamera:** If using Pi AI Camera and IMX, set `MODLIB_LIBCAMERA=LOCAL` and use `scripts/run_backend_imx.sh` so `LD_LIBRARY_PATH` and `PYTHONPATH` point at `/usr/local` libcamera and modlib.
