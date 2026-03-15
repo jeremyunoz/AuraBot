@@ -1,6 +1,14 @@
 # AuraBot
 
-Voice-activated wellness chatbot: STT/TTS, session timers, presence-aware tracking. Supports ESP32+MQTT sensor transport or fully local Raspberry Pi (PIR GPIO + vision). Voice I/O via WebSocket (ESP32 streams Opus; Pi runs ASR/LLM/TTS and returns TTS Opus).
+AuraBot is an edge-AI desktop companion designed to help reduce sedentary behavior in desk-based environments. It monitors user presence, tracks sitting time, and delivers wellness reminders through sensing, voice interaction, and robotic feedback.
+
+The system combines a Raspberry Pi 5 and an ESP32-based robotic module, connected via MQTT and WebSocket. The Raspberry Pi handles vision processing, speech interaction, and reminder logic; the ESP32 manages sensors, motion control, and device feedback.
+
+User activity is detected with an IMX500 AI camera and PIR sensor for continuous presence monitoring. A speech interaction pipeline supports voice commands, timer management, and conversational reminders.
+
+Testing shows the vision pipeline runs at approximately 10 FPS on the Raspberry Pi 5 using IMX500 on-sensor inference, with stable thermal performance. The prototype demonstrates how a distributed edge-AI architecture can support real-time sensing, interaction, and embedded robotics for a wellness-focused desktop companion.
+
+**Project:** [UCI Senior Design 2025–2026 — AuraBot Edge-AI Desk Wellness Companion](https://projects.eng.uci.edu/projects/2025-2026/aurabot-edge-ai-desk-wellness-companion) · **Video demo:** [YouTube](https://youtu.be/ghKhDYF8M4M)
 
 ## Features
 
